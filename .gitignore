@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Virtual environment
+.venv/
+
+# PyInstaller build output (intermediate folders only; icons/scripts/docs stay tracked)
+build/*/
+dist/
+*.spec
+
+# Local data (do not commit real user catalogues)
+catalog.db
+catalog.db-*
+settings.json
+droplens.log
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit credentials
+.env
+*.key
+*.pem
