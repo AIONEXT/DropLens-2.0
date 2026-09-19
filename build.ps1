@@ -23,10 +23,11 @@ python -m pip install -r requirements.txt
 python -m pip install -r requirements-build.txt
 
 if ($Clean) {
-    Step "Cleaning previous build artifacts"
-    if (Test-Path build)  { Remove-Item -Recurse -Force build }
-    if (Test-Path dist)   { Remove-Item -Recurse -Force dist }
-    if (Test-Path "*.spec") { Get-ChildItem -Filter "*.spec" | Remove-Item -Force }
+    Step "Cleaning previous build artifacts (source metadata under build/ is kept)"
+    if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+    Get-ChildItem -Path build -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match 'DropLens' } | Remove-Item -Recurse -Force
+    Get-ChildItem -Filter "*.spec" | Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
 Step "Generating application icon"
@@ -43,7 +44,7 @@ python -X utf8 tests\test_engine.py
 Step "Building DropLens.exe with PyInstaller"
 $verAry = $Version.Split(".")
 $nv = "0.$($verAry[0]).$($verAry[1]).$($verAry[2])"
-python -m PyInstaller --noconfirm --clean `
+python -m PyInstaller --noconfirm `
     --onefile --windowed `
     --name "DropLens" `
     --icon "build\appicon.ico" `

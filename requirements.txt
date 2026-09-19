@@ -7,3 +7,4 @@ charset-normalizer>=3.3.0
 requests>=2.31.0
 tkinterdnd2>=0.4.2
 Pillow>=10.0.0
+pystray>=0.19.5

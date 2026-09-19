@@ -3,6 +3,44 @@
 All notable changes to DropLens are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.0.0] - 2026-09-19
+
+### Added — AI (local & cloud)
+- Pluggable AI framework connecting to **any local or cloud model**: Ollama,
+  LM Studio, llama.cpp, OpenAI, Azure OpenAI, OpenRouter, Groq, Mistral,
+  Anthropic Claude, Google Gemini and any OpenAI-compatible endpoint.
+- Provider management UI (Settings → AI Models): presets, custom endpoint/key,
+  live model listing, one-click **test connection**, active-provider switch.
+- **AI summaries** per document (model-generated, cached in DB, shown in preview).
+- **Smart auto-tagging** across the library with clickable tag chips + tag-filtered
+  search.
+- **Embeddings + semantic search**: toggle “Semantic (AI meaning)” to find files
+  by topic; embedding vectors stored packed in `docmeta`.
+- **AI Assistant**: ask questions about your library; answers use only indexed
+  content and cite the exact source files (hybrid retrieval: embeddings + FTS5).
+- **Folder reports**: executive AI report for any scanned folder.
+- **AI-enrich library** (bulk summaries/tags/embeddings, cancellable) with optional
+  automatic enrichment after scans.
+
+### Added — Professional UX
+- Branded **splash screen** (big runtime-generated icon) on startup.
+- First-run **onboarding wizard**: pick Documents/Downloads/Desktop/Pictures/
+  Music/Videos for silent background scanning and opt into offline local AI.
+- Redesigned dark “deep-space” **sidebar UI**: Library / Search / AI Assistant /
+  Duplicates / Activity pages with stat dashboard cards.
+- **System tray**: silent background operation, scan/notification balloons,
+  “quick scan all”, close-to-tray option.
+- Favourites, notes and related-file (semantic similarity) inspector.
+- **Inno Setup installer**: `installer/DropLens.iss` + `build_installer.ps1`
+  producing `Setup-DropLens.exe` with branded welcome art, shortcuts,
+  uninstaller and silent install.
+
+### Added — Under the hood
+- `docmeta` table (summary, tags, notes, favourite, embedding), `prefs` table,
+  `AIConfig` persisted inside `settings.json`.
+- New AI test (`tests/test_ai.py`) with a stubbed provider covering summaries,
+  tags, embeddings, semantic ranking, related, citations and favourites.
+
 ## [1.0.0] - 2026-09-19
 
 ### Added

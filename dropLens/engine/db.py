@@ -61,6 +61,23 @@ CREATE TABLE IF NOT EXISTS translations (
     PRIMARY KEY (doc_id, lang)
 );
 
+CREATE TABLE IF NOT EXISTS docmeta (
+    doc_id     INTEGER PRIMARY KEY,
+    summary    TEXT,
+    summary_lang TEXT,
+    tags       TEXT,
+    notes      TEXT,
+    favorite   INTEGER NOT NULL DEFAULT 0,
+    ai_status  TEXT,
+    embedding  BLOB,
+    meta_ts    REAL
+);
+
+CREATE TABLE IF NOT EXISTS prefs (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_files_root   ON files(root);
 CREATE INDEX IF NOT EXISTS idx_files_hashes ON files(hash);
 CREATE INDEX IF NOT EXISTS idx_files_size   ON files(size);
@@ -339,6 +356,133 @@ class Catalog:
         )
         params = params + [limit, offset]
         return self.execute(sql, params).fetchall()  # type: ignore[return-value]
+
+    # -- document metadata (AI insights, notes, favourites) -------------------
+    def get_meta(self, doc_id: int) -> Optional[sqlite3.Row]:
+        return self.execute(
+            "SELECT * FROM docmeta WHERE doc_id=?", (doc_id,)
+        ).fetchone()
+
+    def upsert_meta(self, doc_id: int, **fields) -> None:
+        if doc_id <= 0:
+            return
+        current = self.get_meta(doc_id)
+        values = {
+            "summary": fields.get("summary"),
+            "summary_lang": fields.get("summary_lang"),
+            "tags": fields.get("tags"),
+            "notes": fields.get("notes"),
+            "favorite": fields.get("favorite"),
+            "ai_status": fields.get("ai_status"),
+            "embedding": fields.get("embedding"),
+            "meta_ts": time.time(),
+        }
+        if current:
+            merged = dict(current)
+            for k, v in values.items():
+                if v is not None:
+                    merged[k] = v
+            merged["meta_ts"] = values["meta_ts"]
+            self.execute(
+                "UPDATE docmeta SET summary=?, summary_lang=?, tags=?, notes=?, favorite=?, "
+                "ai_status=?, embedding=?, meta_ts=? WHERE doc_id=?",
+                (merged["summary"], merged["summary_lang"], merged["tags"], merged["notes"],
+                 merged["favorite"], merged["ai_status"], merged["embedding"], merged["meta_ts"], doc_id),
+            )
+        else:
+            self.execute(
+                "INSERT OR REPLACE INTO docmeta(doc_id, summary, summary_lang, tags, notes, favorite, "
+                "ai_status, embedding, meta_ts) VALUES(?,?,?,?,?,?,?,?,?)",
+                (doc_id, values["summary"], values["summary_lang"], values["tags"], values["notes"],
+                 values["favorite"] or 0, values["ai_status"], values["embedding"], values["meta_ts"]),
+            )
+        self.commit()
+
+    def toggle_favorite(self, doc_id: int) -> int:
+        meta = self.get_meta(doc_id)
+        flag = 1 if (meta and meta["favorite"]) else 0
+        new_flag = 0 if flag else 1
+        self.upsert_meta(doc_id, favorite=new_flag)
+        return new_flag
+
+    def favorites(self, limit: int = 1000) -> list[sqlite3.Row]:
+        return self.execute(
+            "SELECT f.id, f.name, f.path, f.ext, f.size, f.mtime, f.category, f.kind, f.status, "
+            "       f.hash AS file_hash, f.dup_id, '' AS snip, 0 AS rank, m.tags, m.summary "
+            "FROM docmeta m JOIN files f ON f.id=m.doc_id "
+            "WHERE m.favorite=1 AND f.kind='file' ORDER BY m.meta_ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()  # type: ignore[return-value]
+
+    def list_tags(self) -> list[tuple[str, int]]:
+        """Return [(tag, file_count), ...] across the whole library."""
+        rows = self.execute(
+            "SELECT tags FROM docmeta WHERE tags IS NOT NULL AND tags != ''"
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for r in rows:
+            for t in str(r["tags"]).split(","):
+                t = t.strip()
+                if t:
+                    counts[t] = counts.get(t, 0) + 1
+        return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    def files_with_tag(self, tag: str, limit: int = 500) -> list[sqlite3.Row]:
+        return self.execute(
+            "SELECT f.id, f.name, f.path, f.ext, f.size, f.mtime, f.category, f.kind, f.status, "
+            "       f.hash AS file_hash, f.dup_id, '' AS snip, 0 AS rank "
+            "FROM docmeta m JOIN files f ON f.id=m.doc_id "
+            "WHERE m.tags IS NOT NULL AND (',' || REPLACE(m.tags,' ', '') || ',') LIKE ? "
+            "LIMIT ?",
+            (f"%,{tag},%", limit),
+        ).fetchall()  # type: ignore[return-value]
+
+    def embedding_rows(self, max_chars_of_note: int = 4000) -> list[tuple[int, bytes, str]]:
+        """(doc_id, embedding blob, name) for every documented file with an embedding."""
+        rows = self.execute(
+            "SELECT m.doc_id, m.embedding, f.name FROM docmeta m "
+            "JOIN files f ON f.id=m.doc_id WHERE m.embedding IS NOT NULL"
+        ).fetchall()
+        return [(r["doc_id"], bytes(r["embedding"]), r["name"]) for r in rows]
+
+    def has_embeddings(self) -> bool:
+        row = self.execute("SELECT 1 FROM docmeta WHERE embedding IS NOT NULL LIMIT 1").fetchone()
+        return row is not None
+
+    # -- app preferences (key/value, e.g. onboarding state) --------------------
+    def pref_get(self, key: str, default: str = "") -> str:
+        row = self.execute("SELECT value FROM prefs WHERE key=?", (key,)).fetchone()
+        return str(row["value"]) if row else default
+
+    def pref_set(self, key: str, value: str) -> None:
+        self.execute(
+            "INSERT INTO prefs(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self.commit()
+
+    # -- AI helpers ----------------------------------------------------------
+    def by_name(self, name: str) -> Optional[sqlite3.Row]:
+        return self.execute(
+            "SELECT f.*, d.content FROM files f LEFT JOIN docs d ON d.doc_id=f.id "
+            "WHERE f.kind='file' AND f.name=? ORDER BY f.size DESC LIMIT 1", (name,)
+        ).fetchone()
+
+    def files_under(self, root: str, limit: int = 2000) -> list[sqlite3.Row]:
+        """Files whose path lives inside ``root`` (excluding root itself if a file)."""
+        root = root.rstrip("\\/")
+        like = root + "%"
+        return self.execute(
+            "SELECT * FROM files WHERE kind='file' AND path != ? AND path LIKE ? "
+            "ORDER BY mtime DESC LIMIT ?", (root, like, limit),
+        ).fetchall()  # type: ignore[return-value]
+
+    def files_for_ai(self, limit: int = 3000) -> list[sqlite3.Row]:
+        """Files most likely to benefit from AI enrichment (has text content)."""
+        return self.execute(
+            "SELECT f.id FROM files f WHERE f.kind='file' AND f.status='indexed' "
+            "ORDER BY f.size ASC LIMIT ?", (limit,),
+        ).fetchall()  # type: ignore[return-value]
 
     # -- stats ------------------------------------------------------------
     def stats(self) -> dict[str, Any]:

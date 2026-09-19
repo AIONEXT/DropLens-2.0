@@ -1,0 +1,1 @@
+"""DropLens AI — pluggable local & cloud model integrations."""

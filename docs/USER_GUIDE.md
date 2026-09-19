@@ -2,62 +2,98 @@
 
 ## Getting started
 
-1. Start `DropLens.exe`.
-2. **Drop** folders or files anywhere into the blue drop zone — or use
-   `File → Add Folders/Add Files`. Dropping a single file also indexes its
+1. Install **Setup-DropLens-2.x.exe** (or run the portable `DropLens.exe`).
+2. On first launch a **welcome wizard** appears: tick the folders you want
+   organized silently (Documents, Downloads, Desktop, Pictures, Music, Videos)
+   and choose whether to use a **local AI model** (Ollama / LM Studio — fully
+   offline). DropLens then starts scanning those folders in the background.
+3. **Drop** folders or files anywhere into the drop zone at any time — or use
+   *＋ Add Folders / ＋ Add Files*. Dropping a single file also indexes its
    containing folder.
-3. Wait for the scan to finish (progress bar + live entry counter at the bottom).
-4. Open the **Search** tab and type.
+4. Open the **Search** tab and type — or head to **AI Assistant** and ask a
+   question about your library.
 
-## Library tab (monitored folders)
+## Pages (left navigation rail)
 
-Lists every monitored root with file/folder counts, last scan time and status.
+### Library
+- **Drop zone** — big hero panel: drop anything on it (or on the window body).
+- **Stat cards** — files indexed, folders, size, duplicate groups, smart tags,
+  AI-enriched files.
+- **Monitored folders** — right-click for Rescan / Full rebuild / Open in
+  Explorer / Remove from Library (removes only the local index; your files are
+  never touched). `⟳ Scan all` rescans incrementally; `■ Stop` cancels safely.
+- **Auto-watch** — background re-indexing whenever folders change.
 
-- Right-click a folder → **Rescan**, **Full rebuild** (re-extract everything),
-  **Open in Explorer**, or **Remove from Library** (removes its local index — the
-  original folder is never touched).
-- **Scan Now** rescans everything incrementally (unchanged files are skipped).
-- **Stop** cancels the running scan safely (everything already indexed is kept).
+### Search
+- **Keyword modes** — *All / Name / Path / Content* (AND prefix-wildcards, BM25
+  ranking, full-text highlights).
+- **Semantic (AI meaning)** — engage it to find files *about* the same topic
+  using embeddings instead of exact words. (Requires a provider with an
+  embedding model — enable one in *Settings → AI Models*.)
+- **Tag chips** — click any smart tag to list every file carrying it.
+- Result actions: **Open · Folder · ★ Favorite · Translate… · Copy Path ·
+  Export…**, plus the AI **summary / Notes / Related / Report** controls in the
+  inspector panel on the right.
+- *Load more* pulls the next page (max display 5,000).
 
-## Search tab
+### AI Assistant
+- Ask questions — answers are built **only from your indexed files** and cite
+  the exact sources (double-click a citation to open the file).
+- **AI-enrich library** — generates summaries, smart tags and embeddings for
+  everything (smallest files first; progress bar; safe to interrupt).
+- **Folder report…** — an executive summary of any scanned folder.
 
-- **Search** box + Enter (or press the Search button). Results appear as you type
-  (2+ characters).
-- **Mode** — *All / Name / Path / Content*:
-  - *All* searches names, paths and extracted text together (recommended).
-  - *Content* only matches inside extracted documents (PDF/Office/code/…).
-  - *Name* / *Path* target just those fields.
-- **Type filter** — restrict to one category, e.g. *Spreadsheet* or *PDF
-  documents* (choose `Document` and search).
-- Click a result for a **preview with highlights**; double-click to open.
-- Buttons: **Open · Open Folder · Translate… · Copy Path · Export Results…**.
-- *Load more* pulls in the next page of results (max display 5,000).
-
-## Duplicates tab
-
-Shows identical-file groups detected by content hash. **Details…** opens the full
-list with the wasted-space estimate (excludes the first copy) and exports to CSV.
-Files are only hashed when their byte-size collides, so duplicate detection is
-fast on large libraries.
-
-## Activity tab
-
-A timestamped log of every scan, change and error — useful for verifying large
-indexing runs and troubleshooting (the same lines are appended to
-`%LOCALAPPDATA%\DropLens\droplens.log`).
+### Duplicates & Activity
+- **Duplicates** — identical-byte groups with wasted-space estimates; details +
+  CSV export.
+- **Activity** — timestamped log (same lines written to
+  `%LOCALAPPDATA%\DropLens\droplens.log`).
 
 ## Settings
 
-- **Data location** — where the catalogue lives. Change it and the library
-  reopens from the new location immediately.
-- **Default language** — target language for the Translate dialog.
-- **Worker threads** (1–16) — parallel extraction inside one scan session.
-- **Detect duplicate files** — toggles content hashing.
-- **OCR images** — enable when Tesseract is installed; point at `tesseract.exe`
-  if not auto-detected.
-- **Auto-rescan when folders change** + **Watch interval** — enables the watcher
-  at startup and controls polling frequency (5–600 s).
-- **Ignored names** — comma-separated folder/file names skipped during scans.
+- **Data location** — change where the catalogue lives; library reopens instantly.
+- **Default language / Worker threads / Duplicate detection / OCR (Tesseract) /
+  Auto-watch / Ignored names** — as before.
+- **Tray controls** — show the system tray icon, close the window to tray,
+  notifications after scans.
+- **AI-enrich automatically after scans** — keep metadata fresh without clicking.
+- **AI Models…** — manage providers (see below).
+
+## AI Models (Settings → AI Models)
+
+1. Pick an **Add preset** (Ollama, LM Studio, OpenAI, OpenRouter, Groq, Mistral,
+   Claude, Gemini, custom OpenAI-compatible…) or make your own.
+2. For local models leave the API key empty; for cloud providers paste your key.
+3. Click **Test connection** — a green “Connected ✓” confirms it works.
+4. Enter an **embedding model** (e.g. `nomic-embed-text` for Ollama,
+   `text-embedding-3-small` for OpenAI) to unlock semantic search.
+5. **List models** polls the endpoint for available model ids (OpenAI-compatible
+   servers).
+6. **Set active** makes it the model used for summaries, tags and answers.
+
+### Recommended free setups
+- **Fully offline, no account:** install [Ollama](https://ollama.com) →
+  `ollama pull llama3.1` + `ollama pull nomic-embed-text`, then select the
+  Ollama preset (already the default active provider).
+- **Fast cloud trials:** Groq or OpenRouter with a free API key; add
+  `text-embedding-3-small`-style embedding model where offered.
+
+## Tray (silent operation)
+
+When the tray icon is enabled, DropLens keeps scanning and watching in the
+background even while the window is hidden. Right-click the tray icon to
+**Open DropLens**, **Quick scan (all folders)** or **Exit**; scan/notification
+balloons appear when background jobs complete.
+
+## Privacy notes
+
+- Your originals are **read-only inputs** — never modified.
+- Indexing, search and translation caches are local.
+- With a **local** model nothing ever leaves your PC; with a **cloud** provider
+  only the document excerpts you ask about (or summarize) are sent to that
+  provider — never your whole catalogue.
+
+_Continue below for the pre-v2 notes on translation details._
 
 ## Tips
 

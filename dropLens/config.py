@@ -26,6 +26,15 @@ DEFAULTS: Dict[str, Any] = {
         "$RECYCLE.BIN", "System Volume Information", "Thumbs.db",
         "desktop.ini", ".DS_Store",
     ],
+    # AI provider registry + active provider (dict matches AIConfig.to_dict())
+    "ai": {},
+    # UX preferences
+    "tray_enabled": True,            # system tray icon
+    "close_to_tray": False,          # closing the window keeps scanning silently
+    "notify_scan_done": True,        # tray notification when a scan finishes
+    "onboarded": False,              # first-run wizard shown once
+    "semantic_default": False,       # semantic search enabled by default
+    "ai_auto_enrich": False,         # run AI enrichment right after a scan
 }
 
 _DEFAULTS_COPY = dict(DEFAULTS)
@@ -72,6 +81,14 @@ class Config:
     def ignore_names(self) -> List[str]:
         names = self._d.get("ignore_names", [])
         return [n.strip() for n in names if n and n.strip()]
+
+    # -- AI config ----------------------------------------------------------
+    def ai_config(self):
+        from dropLens.ai.providers import AIConfig  # local import avoids cycles
+        return AIConfig(self._d.get("ai"))
+
+    def set_ai_config(self, ai_cfg) -> None:
+        self._d["ai"] = ai_cfg.to_dict()
 
     def patch(self, **kw: Any) -> None:
         for k, v in kw.items():

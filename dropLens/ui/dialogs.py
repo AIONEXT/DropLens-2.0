@@ -84,12 +84,35 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(frm, text="Ignored names (comma separated):").grid(row=15, column=0, sticky="w", **pad)
         ttk.Entry(frm, textvariable=self.var_ignore).grid(row=16, column=0, sticky="ew", **pad)
 
+        ttk.Label(frm, text="Notifications & UX", font=("", 9, "bold")).grid(row=17, column=0, sticky="w", **pad)
+        self.var_tray = tk.BooleanVar(value=bool(self.cfg.get("tray_enabled", True)))
+        ttk.Checkbutton(frm, text="Show system tray icon (keep running silently)", variable=self.var_tray).grid(
+            row=18, column=0, columnspan=2, sticky="w", **pad)
+        self.var_close_tray = tk.BooleanVar(value=bool(self.cfg.get("close_to_tray", False)))
+        ttk.Checkbutton(frm, text="Close window to tray instead of exiting", variable=self.var_close_tray).grid(
+            row=19, column=0, columnspan=2, sticky="w", **pad)
+        self.var_notify = tk.BooleanVar(value=bool(self.cfg.get("notify_scan_done", True)))
+        ttk.Checkbutton(frm, text="Tray notification after each scan", variable=self.var_notify).grid(
+            row=20, column=0, columnspan=2, sticky="w", **pad)
+        self.var_autoai = tk.BooleanVar(value=bool(self.cfg.get("ai_auto_enrich", False)))
+        ttk.Checkbutton(frm, text="Run AI enrichment automatically after scans", variable=self.var_autoai).grid(
+            row=21, column=0, columnspan=2, sticky="w", **pad)
+
+        btnrow = ttk.Frame(frm)
+        btnrow.grid(row=22, column=0, columnspan=2, sticky="ew", pady=8)
+        ttk.Button(btnrow, text="AI Models…", command=self._open_ai, style="Ghost.TButton").pack(side="left")
+
         btns = ttk.Frame(frm)
-        btns.grid(row=17, column=0, columnspan=2, sticky="e", pady=12)
+        btns.grid(row=23, column=0, columnspan=2, sticky="e", pady=4)
         ttk.Button(btns, text="Save", command=self._save).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left")
 
         frm.columnconfigure(0, weight=1)
+
+    def _open_ai(self):
+        def saved():
+            self.store.save(self.cfg)
+        AISettingsDialog(self, self.cfg, saved)
 
     def _pick_dir(self):
         d = filedialog.askdirectory(title="Choose DropLens data directory", initialdir=self.var_data_dir.get())
@@ -112,6 +135,10 @@ class SettingsDialog(tk.Toplevel):
             watch_interval=int(self.var_interval.get() or 15),
             default_lang=SUPPORTED_LANGS.get(self.var_lang.get(), "en"),
             ignore_names=[s.strip() for s in self.var_ignore.get().split(",") if s.strip()],
+            tray_enabled=bool(self.var_tray.get()),
+            close_to_tray=bool(self.var_close_tray.get()),
+            notify_scan_done=bool(self.var_notify.get()),
+            ai_auto_enrich=bool(self.var_autoai.get()),
         )
         self.store.save(self.cfg)
         self.on_saved(self.cfg)
@@ -315,3 +342,329 @@ def open_path(path: str):
             os.startfile(path)  # type: ignore[attr-defined]
     except OSError as exc:
         messagebox.showerror("DropLens", f"Cannot open:\n{path}\n\n{exc}")
+
+
+# ---------------------------------------------------------------------------
+# AI provider settings
+# ---------------------------------------------------------------------------
+class AISettingsDialog(tk.Toplevel):
+    """Provider CRUD, active selection, `test connection`, live model listing."""
+
+    def __init__(self, master: tk.Misc, cfg: Config, save_cb):
+        super().__init__(master)
+        self.cfg = cfg
+        self.save_cb = save_cb
+        self.ai_cfg = cfg.ai_config()
+        self.provider_keys: dict[str, str] = {}
+
+        self.title(f"{APP_NAME} — AI Models")
+        self.geometry("880x600")
+        self.minsize(760, 480)
+        self.transient(master)
+        self.configure(bg="#11161f")
+
+        self._build()
+        self.grab_set()
+
+    def _build(self):
+        pad = {"padx": 8, "pady": 4}
+        frm = tk.Frame(self, bg="#11161f"); frm.pack(fill="both", expand=True, padx=10, pady=10)
+        frm.columnconfigure(0, weight=1); frm.rowconfigure(0, weight=1)
+
+        panes = ttk.PanedWindow(frm, orient="horizontal")
+        panes.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        panes.paneconfigure(0, weight=1)
+
+        left = tk.Frame(panes, bg="#0d1117")
+        panes.add(left, weight=2)
+        tk.Label(left, text="Providers", bg="#0d1117", fg="#e6edf3",
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=6, pady=(4, 2))
+        cols = ("Provider", "k")
+        tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse", height=16)
+        for c, w in zip(cols, (230, 60)):
+            tree.heading(c, text=c); tree.column(c, width=w, anchor="w")
+        vsb = ttk.Scrollbar(left, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=8)
+        vsb.pack(side="right", fill="y", pady=8)
+        tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
+        self.tree = tree
+
+        acts = tk.Frame(frm, bg="#11161f")
+        acts.grid(row=1, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Button(acts, text="Add preset…", command=self._add_preset).pack(side="left", padx=4)
+        ttk.Button(acts, text="Duplicate", command=self._dup).pack(side="left", padx=4)
+        ttk.Button(acts, text="Delete", command=self._delete).pack(side="left", padx=4)
+        ttk.Button(acts, text="Set active", command=self._set_active).pack(side="left", padx=4)
+        ttk.Button(acts, text="Test connection", command=self._test).pack(side="right", padx=4)
+
+        right = tk.Frame(panes, bg="#161b26")
+        panes.add(right, weight=3)
+        container = tk.Frame(right, bg="#161b26"); container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        def label(text, row):
+            tk.Label(container, text=text, bg="#161b26", fg="#8b98a9",
+                     font=("Segoe UI", 9, "bold"), anchor="w").grid(row=row, column=0, sticky="we", pady=(8, 0))
+
+        label("NAME", 0)
+        self.var_name = tk.StringVar()
+        tk.Entry(container, textvariable=self.var_name, bg="#1a2130", fg="#e6edf3",
+                 insertbackground="#e6edf3", relief="flat", highlightthickness=1,
+                 highlightbackground="#263045").grid(row=1, column=0, sticky="we")
+
+        label("ENDPOINT (base URL)", 2)
+        self.var_url = tk.StringVar()
+        tk.Entry(container, textvariable=self.var_url, bg="#1a2130", fg="#e6edf3",
+                 insertbackground="#e6edf3", relief="flat", highlightthickness=1,
+                 highlightbackground="#263045").grid(row=3, column=0, sticky="we")
+
+        label("API KEY (empty for local models)", 4)
+        self.var_key = tk.StringVar()
+        self.var_key_box = tk.Entry(container, textvariable=self.var_key, show="•", bg="#1a2130",
+                                    fg="#e6edf3", insertbackground="#e6edf3", relief="flat",
+                                    highlightthickness=1, highlightbackground="#263045")
+        self.var_key_box.grid(row=5, column=0, sticky="we")
+        self.key_show_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(container, text="show key", variable=self.key_show_var, bg="#161b26",
+                       activebackground="#161b26", fg="#8b98a9", highlightthickness=0,
+                       selectcolor="#1a2130", font=("Segoe UI", 8),
+                       command=self._toggle_key).grid(row=6, column=0, sticky="w")
+
+        label("CHAT MODEL", 7)
+        self.var_model = tk.StringVar()
+        row_model = tk.Frame(container, bg="#161b26")
+        row_model.grid(row=8, column=0, sticky="we")
+        tk.Entry(row_model, textvariable=self.var_model, bg="#1a2130", fg="#e6edf3",
+                 insertbackground="#e6edf3", relief="flat", highlightthickness=1,
+                 highlightbackground="#263045").pack(side="left", fill="x", expand=True)
+        ttk.Button(row_model, text="List models", command=self._list_models, style="Ghost.TButton").pack(
+            side="left", padx=6)
+
+        label("EMBEDDING MODEL (optional · semantic search)", 9)
+        self.var_embed = tk.StringVar()
+        tk.Entry(container, textvariable=self.var_embed, bg="#1a2130", fg="#e6edf3",
+                 insertbackground="#e6edf3", relief="flat", highlightthickness=1,
+                 highlightbackground="#263045").grid(row=10, column=0, sticky="we")
+
+        self.var_hint = tk.StringVar(value="")
+        tk.Label(container, textvariable=self.var_hint, bg="#161b26", fg="#5b6777",
+                 font=("Segoe UI", 8), wraplength=430, justify="left").grid(
+            row=12, column=0, sticky="we", pady=(8, 0))
+
+        self.var_test = tk.StringVar(value="")
+        tk.Label(container, textvariable=self.var_test, bg="#161b26", fg="#34d399",
+                 font=("Segoe UI", 9), wraplength=430).grid(row=13, column=0, sticky="w", pady=(6, 0))
+
+        tk.Label(container, text="Kind", bg="#161b26", fg="#8b98a9", font=("Segoe UI", 9, "bold")).grid(
+            row=14, column=0, sticky="w", pady=(12, 0))
+        self.var_kind = tk.StringVar(value="openai")
+        tk.Combobox(container, textvariable=self.var_kind, state="readonly",
+                    values=("openai", "anthropic", "gemini")).grid(row=15, column=0, sticky="w")
+
+        row_save = tk.Frame(container, bg="#161b26")
+        row_save.grid(row=16, column=0, sticky="e", pady=14)
+        self.var_active = tk.BooleanVar()
+        ttk.Checkbutton(row_save, text="Active provider", variable=self.var_active,
+                        style="Accent.TButton").pack(side="left", padx=6)
+        ttk.Button(row_save, text="Save", command=self._save).pack(side="left", padx=4)
+        ttk.Button(row_save, text="Done", command=self.destroy).pack(side="left")
+
+        container.columnconfigure(0, weight=1)
+        self.tree = tree
+        self._load_tree()
+        self._on_select()
+
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def _load_tree(self):
+        self.tree.delete(*self.tree.get_children())
+        self.provider_keys.clear()
+        for i, p in enumerate(self.ai_cfg.providers):
+            iid = f"p{i}"
+            mark = "● " if p.name == self.ai_cfg.active else "  "
+            self.tree.insert("", "end", iid=iid, values=(mark + p.name, p.kind))
+            self.provider_keys[iid] = p.name
+        if self.ai_cfg.providers:
+            self.tree.selection_set(self.tree.get_children()[0])
+
+    def _selected_provider(self):
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        return self.provider_keys.get(sel[0])
+
+    def _on_select(self):
+        name = self._selected_provider()
+        p = next((x for x in self.ai_cfg.providers if x.name == name), None)
+        if not p:
+            return
+        from .theme import CARD, MUTED
+        self.var_name.set(p.name)
+        self.var_url.set(p.base_url)
+        self.var_key.set(p.api_key)
+        self.var_model.set(p.model)
+        self.var_embed.set(p.embedding_model)
+        self.var_kind.set(p.kind)
+        self.var_active.set(p.name == self.ai_cfg.active)
+        hint = self._hint_for(p.name)
+        self.var_hint.set(hint)
+        self.var_test.set("")
+
+    @staticmethod
+    def _hint_for(name):
+        from dropLens.ai.providers import preset_for
+        pr = preset_for(name)
+        return pr["hint"] if pr else "Local models run fully offline. Cloud providers need an API key."
+
+    def _collect(self) -> object:
+        from dropLens.ai.providers import AIProvider
+        return AIProvider(
+            name=self.var_name.get().strip() or "Provider",
+            kind=self.var_kind.get() or "openai",
+            base_url=self.var_url.get().strip(),
+            api_key=self.var_key.get().strip(),
+            model=self.var_model.get().strip(),
+            embedding_model=self.var_embed.get().strip(),
+        )
+
+    def _save(self):
+        provider = self._collect()
+        self.ai_cfg.upsert_provider(provider)
+        if self.var_active.get():
+            self.ai_cfg.active = provider.name
+        else:
+            current = self._selected_provider()
+            if current and current == self.ai_cfg.active and current != provider.name:
+                pass
+        self.cfg.set_ai_config(self.ai_cfg)
+        self.save_cb()
+        self._load_tree()
+        self._flash("Saved ✓")
+
+    def _flash(self, text):
+        self.var_test.set(text)
+
+    def _add_preset(self):
+        from dropLens.ai.providers import PRESETS
+        names = list(PRESETS.keys())
+        dlg = tk.Toplevel(self)
+        dlg.title("Add provider preset")
+        dlg.configure(bg="#0d1117")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        tk.Label(dlg, text="Choose a provider template:", bg="#0d1117", fg="#e6edf3").pack(
+            padx=14, pady=(12, 4))
+        var = tk.StringVar(value=names[0])
+        box = ttk.Combobox(dlg, textvariable=var, values=names, state="readonly", width=30)
+        box.pack(padx=14, pady=4)
+
+        def pick():
+            self.ai_cfg.upsert_provider(
+                __import__("dropLens.ai.providers", fromlist=["AIProvider"]).AIProvider(
+                    name=var.get(), **{k: v for k, v in
+                                       __import__("dropLens.ai.providers", fromlist=["PRESETS"]).PRESETS[var.get()].items() if k != "hint"}))
+            self.cfg.set_ai_config(self.ai_cfg)
+            self.save_cb()
+            self._load_tree()
+            dlg.destroy()
+
+        ttk.Button(dlg, text="Add", command=pick).pack(pady=10)
+        dlg.grab_set()
+
+    def _dup(self):
+        name = self._selected_provider()
+        p = next((x for x in self.ai_cfg.providers if x.name == name), None)
+        if not p:
+            return
+        from copy import deepcopy
+        cp = deepcopy(p)
+        cp.name = cp.name + " copy"
+        self.ai_cfg.upsert_provider(cp)
+        self._load_tree()
+
+    def _delete(self):
+        name = self._selected_provider()
+        if not name or not messagebox.askyesno("DropLens", f"Delete provider “{name}”?"):
+            return
+        self.ai_cfg.delete_provider(name)
+        self._load_tree()
+
+    def _set_active(self):
+        name = self._selected_provider()
+        if name:
+            self.ai_cfg.active = name
+            self.cfg.set_ai_config(self.ai_cfg)
+            self.save_cb()
+            self._load_tree()
+            self.var_test.set(f"{name} is now the active provider ✓")
+        self._on_select()
+
+    def _test(self):
+        provider = self._collect()
+        self.var_test.set("Testing connection…")
+        self.update_idletasks()
+
+        def work():
+            from dropLens.ai.client import AIConnectionError, ping
+            try:
+                reply = ping(provider)
+                ok = reply.strip().lower().startswith("ok")
+                self.after(0, lambda: self.var_test.set(
+                    f"Connected ✓ ({provider.name} · {provider.model} · reply: {reply[:40]})"
+                    if ok else f"Reachable, unexpected reply: {reply[:60]}"))
+            except AIConnectionError as exc:
+                self.after(0, lambda e=exc: self.var_test.set(f"Failed: {e}"))
+            except Exception as exc:
+                self.after(0, lambda e=exc: self.var_test.set(f"Failed: {e}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _list_models(self):
+        provider = self._collect()
+        self.var_test.set("Querying model list…")
+        self.update_idletasks()
+
+        def work():
+            from dropLens.ai.client import AIConnectionError, list_models
+            try:
+                models = list_models(provider)
+                if not models:
+                    self.after(0, lambda: self.var_test.set(
+                        "No model list exposed at this endpoint (enter the model name manually)."))
+                    return
+                self.after(0, lambda: self._show_models(models, provider))
+            except AIConnectionError as exc:
+                self.after(0, lambda e=exc: self.var_test.set(f"Failed: {e}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_models(self, models, provider):
+        dlg = tk.Toplevel(self)
+        dlg.title("Available models")
+        dlg.geometry("420x460")
+        dlg.transient(self)
+        tk.Label(dlg, text="Select a chat model:", bg="#0d1117", fg="#e6edf3").pack(
+            padx=10, pady=8, anchor="w")
+        box = tk.Listbox(dlg, bg="#1a2130", fg="#e6edf3", selectbackground="#2563eb",
+                         selectforeground="#ffffff", font=("Segoe UI", 10))
+        for m in models:
+            box.insert("end", m)
+        box.pack(fill="both", expand=True, padx=10)
+        emb = [m for m in models if "embed" in m.lower() or "bge" in m.lower()]
+
+        def choose():
+            sel = box.curselection()
+            if sel:
+                self.var_model.set(models[sel[0]])
+            dlg.destroy()
+
+        ttk.Button(dlg, text="Use selected", command=choose).pack(pady=8, side="left", padx=24)
+        if emb:
+            tk.Label(dlg, text="Possible embedding models: " + ", ".join(emb[:6]) + "…",
+                     bg="#0d1117", fg="#5b6777", font=("Segoe UI", 8), wraplength=380,
+                     justify="left").pack(side="bottom", padx=10, pady=8)
+        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=8, side="right", padx=24)
+        dlg.grab_set()
+
+    def _toggle_key(self):
+        self.var_key_box.configure(show="" if self.key_show_var.get() else "•")
