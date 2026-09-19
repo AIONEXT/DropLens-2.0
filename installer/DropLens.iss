@@ -10,6 +10,9 @@
 #ifndef MyAppOutputDir
   #define MyAppOutputDir "dist"
 #endif
+#ifndef MyRepoRoot
+  #define MyRepoRoot ".."
+#endif
 
 #define MyAppName "DropLens"
 #define MyAppPublisher "DropLens"
@@ -26,17 +29,17 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-OutputDir={#MyAppOutputDir}
+OutputDir={#MyRepoRoot}\{#MyAppOutputDir}
 OutputBaseFilename=Setup-DropLens-{#MyAppVersion}
-SetupIconFile=build\appicon.ico
+SetupIconFile={#MyRepoRoot}\build\appicon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ; big branded welcome image (744x386) — generated at build time if present; else default
-WizardImageFile=build\installer_welcome.bmp
+WizardImageFile={#MyRepoRoot}\build\installer_welcome.bmp
 WizardImageStretch=no
-WizardSmallImageFile=build\installer_side.bmp
+WizardSmallImageFile={#MyRepoRoot}\build\installer_side.bmp
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -46,8 +49,8 @@ Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "A
 Name: "tray"; Description: "Run &silently in the system tray after install"; GroupDescription: "Startup:"
 
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\appicon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyRepoRoot}\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyRepoRoot}\build\appicon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\appicon.ico"
@@ -58,6 +61,9 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Tasks: tray
 
 [Code]
+var
+  ErrorCode: Integer;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
