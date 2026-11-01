@@ -12,6 +12,8 @@ Tesseract is installed.
 """
 from __future__ import annotations
 
+import gzip
+import logging
 import os
 import re
 import tarfile
@@ -19,6 +21,10 @@ import zipfile
 from typing import Optional
 
 from charset_normalizer import from_bytes
+
+from .chunk import PAGE_MARK
+
+log = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Optional heavy dependencies (fail gracefully when missing)
@@ -63,6 +69,13 @@ except ImportError:  # pragma: no cover
 
 _MAX_CONTENT = int(os.environ.get("DROPLENS_MAX_CONTENT", 5_000_000))
 
+
+def set_max_content(chars: int) -> None:
+    """Apply the user's stored-text cap (settings → max_content_chars)."""
+    global _MAX_CONTENT
+    _MAX_CONTENT = max(10_000, int(chars))
+
+
 _TEXTLIKE_MAX = 512 * 1024  # sniff/decode limit for "binary-looking" safety
 
 # extensions we know are part of the auto-detected text family
@@ -75,7 +88,7 @@ _TEXT_EXTENSIONS = {
     "ini", "cfg", "conf", "yaml", "yml", "toml", "properties", "env",
     "gitignore", "dockerignore", "dockerfile", "makefile", "cmake", "gradle",
     "url", "webloc", "srt", "vtt", "nfo", "diz", "diff", "patch", "reg",
-    "ico", "svgz", "map",
+    "map",
 }
 
 
@@ -143,18 +156,23 @@ def _extract_text_file(path: str) -> Optional[str]:
 # PDF
 # --------------------------------------------------------------------------
 def _extract_pdf(path: str) -> Optional[str]:
+    """PDF text, pages separated by ``chunk.PAGE_MARK`` so citations can say "p.4"."""
     if _fitz is None:
         return None
-    out: list[str] = []
+    pages: list[str] = []
+    total = 0
     try:
         with _fitz.open(path) as doc:
             for page in doc:
-                out.append(page.get_text("text") or "")
-                if sum(len(o) for o in out) > _MAX_CONTENT:
+                text = _clean([page.get_text("text") or ""])
+                pages.append(text)
+                total += len(text)
+                if total > _MAX_CONTENT:
                     break
     except Exception:
         return None
-    return _clean(out) or None
+    body = PAGE_MARK.join(pages).strip()
+    return body or None
 
 
 # --------------------------------------------------------------------------
@@ -296,6 +314,16 @@ def _extract_rtf(path: str) -> Optional[str]:
 # --------------------------------------------------------------------------
 # Archives (contents listing), e-books, e-mail
 # --------------------------------------------------------------------------
+def _extract_gzip_text(path: str) -> Optional[str]:
+    """`.svgz` is gzip-compressed SVG/XML — decompress it, then decode as text."""
+    try:
+        with gzip.open(path, "rb") as fh:
+            raw = fh.read(_TEXTLIKE_MAX)
+    except (OSError, EOFError, ValueError):
+        return None
+    return _decode_bytes(raw)
+
+
 def _extract_archive(path: str) -> Optional[str]:
     out: list[str] = []
     ext = os.path.splitext(path)[1].lower()
@@ -312,15 +340,24 @@ def _extract_archive(path: str) -> Optional[str]:
                     if m.isfile():
                         out.append(m.name)
         elif ext == ".7z" or ext == ".rar":
-            try:
-                import py7zr
-                with py7zr.SevenZipFile(path) as z:
-                    for name in z.getnames():
-                        out.append(name)
-            except ImportError:
-                return None
-            except Exception:
-                return None
+            if ext == ".rar":
+                # py7zr cannot read RAR; use rarfile when it is installed.
+                try:
+                    import rarfile
+                    with rarfile.RarFile(path) as rf:
+                        out.extend(rf.namelist())
+                except Exception:
+                    return None
+            else:
+                try:
+                    import py7zr
+                    with py7zr.SevenZipFile(path) as z:
+                        for name in z.getnames():
+                            out.append(name)
+                except ImportError:
+                    return None
+                except Exception:
+                    return None
         else:
             return None
     except Exception:
@@ -464,6 +501,7 @@ _BINARY_EXTRACTORS = {
     "tgz": _extract_archive,
     "7z": _extract_archive,
     "rar": _extract_archive,
+    "svgz": _extract_gzip_text,
     "epub": _extract_epub,
     "eml": _extract_eml,
     "msg": _extract_msg_file,
@@ -472,8 +510,37 @@ _BINARY_EXTRACTORS = {
 _IMAGE_EXTS = {"png", "jpg", "jpeg", "bmp", "tiff", "tif", "gif", "webp", "ico"}
 
 
+def _plugin_text(path: str, ext: str) -> Optional[str]:
+    """Ask a plugin extractor for this extension (None when none is registered)."""
+    from ..extensions import default as extensions
+    extractor = extensions().extractor_for(ext)
+    if extractor is None:
+        return None
+    return extractor(path)
+
+
+def _builtin_text(path: str, ext: str, ocr_enabled: bool,
+                  tesseract_path: str) -> tuple[Optional[str], str]:
+    """The shipped extractors: heavy parsers first, then text, then OCR."""
+    if ext in _BINARY_EXTRACTORS:
+        return _BINARY_EXTRACTORS[ext](path), "indexed"
+    if ext in _TEXT_EXTENSIONS:
+        return _extract_text_file(path), "indexed"
+    if ext in _IMAGE_EXTS:
+        if not ocr_enabled or pytesseract is None:
+            return None, "ocr_unavailable"
+        text = _extract_image_ocr(path, tesseract_path) or None
+        return text, ("indexed" if text else "ocr_unavailable")
+    return None, "no_content"
+
+
 def extract_content(path: str, *, ocr_enabled: bool = True, tesseract_path: str = "") -> tuple[Optional[str], str]:
     """Extract full-text content from *path*.
+
+    A registered plugin extractor is tried first and may decline by returning
+    ``None``, in which case the built-in parser for that extension runs. That
+    is what lets a plugin add a format DropLens has never seen without the
+    built-in formats becoming unreachable.
 
     Returns ``(content, status)``:
       content   extracted text or None
@@ -481,20 +548,14 @@ def extract_content(path: str, *, ocr_enabled: bool = True, tesseract_path: str 
     """
     ext = os.path.splitext(path)[1].lstrip(".").lower()
     try:
-        if ext in _BINARY_EXTRACTORS:
-            text = _BINARY_EXTRACTORS[ext](path)
-        elif ext in _TEXT_EXTENSIONS:
-            text = _extract_text_file(path)
-        elif ext in _IMAGE_EXTS:
-            if not ocr_enabled or pytesseract is None:
-                return None, "ocr_unavailable"
-            text = _extract_image_ocr(path, tesseract_path) or None
-            if text is None:
-                return None, "ocr_unavailable"
-        else:
-            text = None
+        text = _plugin_text(path, ext)
+        if text is None:
+            text, status = _builtin_text(path, ext, ocr_enabled, tesseract_path)
+            if status != "indexed":
+                return None, status
     except Exception as exc:  # noqa: BLE001 - never let extraction kill the scan
-        return None, f"failed"
+        log.debug("extraction failed for %s: %s", path, exc)
+        return None, "failed"
     if text:
         return _limit(text), "indexed"
     return None, "no_content"

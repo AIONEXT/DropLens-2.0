@@ -84,6 +84,10 @@ tags = svc.auto_tag(1)
 assert tags == ["finance", "warehouse", "quarterly"], tags
 svc.embed_doc(1)
 svc.embed_doc(2)
+# embedding is chunk-level now: several vectors per document, plus a doc vector
+assert len(db.chunks_for_doc(1)) >= 1
+assert db.chunk_vector_count() >= 2, db.chunk_vector_count()
+assert db.get_meta(1)["content_hash"], "docs must record the version they were derived from"
 
 # metadata persists
 meta1 = db.get_meta(1)
@@ -108,10 +112,14 @@ assert len(rows) == 1
 rel = svc.related(1, top_k=3)
 assert rel and rel[0][0] == 2, rel
 
-# ask: cites in answer resolved back
+# ask: citations are structured records that map back to a chunk and offsets
 answer, cites = svc.ask("Where is the budget covered?")
 assert "report.pdf" in answer, answer
-assert any("report.pdf" in name for name, path in cites), cites
+assert cites, "no citations returned"
+assert any(c["name"] == "report.pdf" for c in cites), cites
+for c in cites:
+    assert {"chunk_id", "doc_id", "path", "page", "start_char", "end_char"} <= set(c), c
+    assert c["doc_id"] in (1, 2), c
 
 # prefs round trip
 db.pref_set("onboarded", "1")

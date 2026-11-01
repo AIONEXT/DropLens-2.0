@@ -30,7 +30,9 @@ files — searchable **by keyword and by meaning**.
 | ✨ **Branded installer & splash** | Professional Inno Setup installer with big welcome art, Start-menu/desktop shortcuts and uninstaller; branded splash + onboarding wizard on first launch. |
 | 🧠 **Any AI model, local or cloud** | Connect **Ollama, LM Studio, llama.cpp, OpenAI, Azure, OpenRouter, Groq, Mistral, Anthropic Claude, Google Gemini or any OpenAI-compatible API** — offline models for zero-cost privacy, cloud models for maximum power. |
 | 🔎 **Search by keyword AND meaning** | Fuzzy full-text search (FTS5 + BM25) over names, paths and content **plus** semantic search via embeddings that finds files about the same *topic* even with different words. |
-| 🤖 **AI understanding of your data** | Auto **summaries**, **smart tags**, **embeddings**, an **AI assistant that answers questions about your library with file citations**, and **folder reports**. |
+| 🤖 **AI understanding of your data** | Auto **summaries**, **smart tags**, **embeddings**, an **AI assistant that answers questions about your library and cites the exact passage**, and **folder reports**. |
+| 🎯 **Paragraph-level hybrid retrieval** | BM25 over chunk indexes **fused** with chunk embeddings (Reciprocal Rank Fusion); answers cite `[#42] report.pdf · p.3` and the preview jumps to that passage. |
+| 🖥 **CLI + egress log** | `python -m dropLens search|scan|ask|stats|export|jobs` with `--json`; an **offline-only** switch and a “what leaves this machine” log. |
 | 📄 **25+ formats extracted** | PDF · Word · Excel · PowerPoint · LibreOffice · text · code · JSON/XML/CSV · e-books · e-mail · archives · images (OCR) and more — your originals are **never modified**. |
 | 🌍 **Translation** | Translate any item’s content into 70+ languages (cached locally, originals untouched). |
 | 🧹 **Organization** | Auto-categorization, duplicates by content-hash, **favourites, notes, related files**, stats dashboard. |
@@ -68,11 +70,44 @@ powershell -ExecutionPolicy Bypass -File .\build_installer.ps1 # -> dist\Setup-D
 
 ### AI (works with any local or cloud model)
 - **Providers:** Ollama, LM Studio, llama.cpp, OpenAI, Azure OpenAI, OpenRouter, Groq, Mistral, Anthropic Claude, Google Gemini, or any OpenAI-compatible endpoint. Presets included; add your own URL/key/model.
+- **Respan Gateway (embedded):** the *Respan Gateway (local)* provider sends every call through an in-process, loopback-only LLM gateway — routes, fallback and provider translation live in one `gateway.toml`, and the model field takes a route name (`smart`) or `provider/model`. Keys stay in Settings or in `env:NAME` references.
 - Add presets under **Settings → AI Models**, hit **Test connection**, and pick an embedding model for semantic search (e.g. `nomic-embed-text`, `text-embedding-3-small`).
 - **AI summary** per document (cached), **auto tags** (clickable chips), **favourites & notes**, **related files** (embedding similarity).
 - **AI Assistant** answers questions using only your indexed files and **cites the exact sources**.
 - **AI-enrich library** generates summaries/tags/embeddings for everything (smallest files first, cancellable) — optionally automatic after each scan.
 - No data leaves your machine unless you configure an online provider; local providers run fully offline.
+
+### Respan Gateway (embedded, loopback only)
+
+`respan-gateway==0.3.0` runs **inside** DropLens (`dropLens/ai/gateway.py`): it starts
+`respan_gateway.Gateway().serve(port=0)` on `127.0.0.1` and the `gateway` provider kind
+resolves that URL per request. Summaries, tags, embeddings, tool calling and the
+assistant keep their existing client — only routing, fallback and provider translation
+move into one configuration file. Guide: [respanai/respan-gateway](https://github.com/respanai/respan-gateway?utm_source=freebuff&utm_medium=paid&utm_campaign=respan-gateway&bfcid=bfc_1.eyJpZCI6IjlmOGQyYzYyLTYwZjAtNDcxNC04YTRlLWY5MmI4NDk4ODY5MSIsImMiOiIyMDM2ODZkZS1mMzg0LTQ4NTQtYmViNC1hYzBiYWRmNmM1NTUiLCJrIjoiM2IxMGE4YmUtNzgyOS00MmJhLWFmNmEtYmI0YWUxZTRhY2Y4IiwiaWF0IjoxNzkzNDM2MDY0fQ.fL2Dz1C-E1VcSgzJUIuc047M-s1R1huNKjoheyPPBno).
+
+1. Install the pinned wheel: `pip install -r requirements.txt` (wheels for Linux/macOS x64+arm64, Windows x64; Python 3.10+).
+2. Describe where models go in `<data folder>/gateway.toml` (or point `DROPLENS_GATEWAY_CONFIG` at a file):
+
+   ```toml
+   log = "text"
+   [providers.ollama]              # vendor keys, or any OpenAI-compatible base_url
+   vendor = "ollama"
+   base_url = "http://localhost:11434"
+   [routes.smart]                  # what the app asks for
+   to = ["ollama/llama3.1", "openai/gpt-4o-mini"]
+   tries = 2
+   ```
+
+3. **Settings → AI Models → Add preset → Respan Gateway (local)**; set **Model** to a route
+   (`smart`) or `provider/model`, keep the key empty (or paste the gateway's client key if
+   `gateway.toml` declares `client_keys`), and **Test connection**.
+4. Run the app as usual: `python launcher.py` (or `python -m dropLens`).
+
+**Observed result:** `python -X utf8 tests/test_gateway.py` drives chat completions, tool
+calling, embeddings, `/v1/models` and the connectivity probe through the embedded gateway
+to a local OpenAI-compatible fixture — 4 fixture requests, all assertions pass, no account,
+key or deployment involved. Live provider calls were **not** verified here (no provider
+credentials in this environment); they run in your normal app setup with your own keys.
 
 ### Search
 - **Keyword modes:** *All* (name+path+content), *Name*, *Path*, *Content* — AND-prefix wildcards, BM25 ranking, highlighted snippets.
@@ -92,13 +127,26 @@ powershell -ExecutionPolicy Bypass -File .\build_installer.ps1 # -> dist\Setup-D
 | Spreadsheets | XLSX · XLS (legacy) · ODS · CSV/TSV |
 | Presentations | PPTX · PPT (legacy) · ODP |
 | E-book & e-mail | EPUB · EML · MSG (when `extract-msg` installed) |
-| Archives | ZIP · TAR · GZ · BZ2 · XZ · 7Z · RAR (content listing) |
+| Archives | ZIP · TAR · GZ · BZ2 · XZ · 7Z · RAR (content listing; 7Z/RAR extractors bundled) |
 | Images | OCR when **Tesseract** is installed (auto-detected) |
 
 ### Duplicates, Translation, Auto-watch
 - Duplicates by **content hash** with a size-collision short-circuit (hashes only colliding sizes — fast on thousands of files).
 - Translation of any result into 70+ languages, cached in the DB, exported as `.txt`. Source never altered.
 - **Auto-watch** re-indexes changed folders incrementally by size+mtime fingerprint.
+
+### Extensions, tools and the AI interface
+- **Extensible by file** — drop a Python file into `<data folder>/plugins/` to add an
+  extractor for a new format, a tool the assistant can call, or a hook that runs after a
+  document is indexed. A broken plugin is listed with its error and otherwise ignored.
+- **Read-only tools** — `search_library`, `read_document`, `library_stats`,
+  `list_documents`. The assistant can look things up; it can never change your files.
+- **Two ways to ask** — `droplens ask` (one retrieval-grounded call) and
+  `droplens ask --tools` (bounded tool-calling loop, at most 4 rounds, citations still
+  resolved to real chunk ids).
+- `droplens tools` and `droplens extensions` list what is available. Details in
+  [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md); worked example in
+  [`examples/plugins/csv_tables.py`](examples/plugins/csv_tables.py).
 
 ### Privacy & data quality
 - Indexes are **read-only copies**; originals are never modified.
@@ -125,8 +173,8 @@ Override at runtime with the `DROPLENS_DIR` environment variable, or change
 See [`build/BUILD.md`](build/BUILD.md). Short version:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean -Version 2.0.0      # DropLens.exe
-powershell -ExecutionPolicy Bypass -File .\build_installer.ps1 -Version 2.0.0   # Setup-DropLens.exe
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean -Version 2.2.0      # DropLens.exe
+powershell -ExecutionPolicy Bypass -File .\build_installer.ps1 -Version 2.2.0   # Setup-DropLens.exe
 ```
 
 > **For public/commercial distribution:** code-sign both exes (OV/EV cert) and
@@ -136,6 +184,10 @@ powershell -ExecutionPolicy Bypass -File .\build_installer.ps1 -Version 2.0.0   
 
 ## Architecture
 
+The complete framework architecture — layering rules, storage schema, indexing
+pipeline, retrieval, AI/agent layer, extension system, trust model and known gaps —
+lives in [`read.md`](read.md). The tree below is the short version.
+
 ```
 dropLens/
 ├─ main.py              # entry point (splash → onboarding → window; crash-safe logging)
@@ -143,18 +195,26 @@ dropLens/
 ├─ resources.py         # paths, logging, Tesseract discovery
 ├─ ai/
 │  ├─ providers.py      # local/cloud provider presets (Ollama, OpenAI, Gemini, …)
-│  ├─ client.py         # OpenAI-compatible / Anthropic / Gemini HTTP clients
+│  ├─ client.py         # OpenAI-compatible / Anthropic / Gemini clients (+ tool calling)
+│  ├─ agent.py          # bounded, provider-neutral tool-calling loop
 │  └─ svc.py            # summaries, tags, embeddings, semantic search, RAG assistant
+├─ tools.py             # read-only catalogue tools + Toolbox (JSON schemas)
+├─ extensions/          # plugin registry: extractors, tools, hooks
+├─ cli.py               # headless search/scan/ask/tools/extensions/export/…
+├─ net.py               # egress policy (offline-only) + outbound request log
+├─ secure.py            # DPAPI sealing for API keys
 ├─ engine/
-│  ├─ db.py             # SQLite + FTS5 catalogue + docmeta (AI insights) + prefs
+│  ├─ db.py             # SQLite + FTS5 catalogue, chunks, docmeta, jobs, prefs
+│  ├─ migrations.py     # PRAGMA user_version schema migrations
+│  ├─ chunk.py          # page-aware paragraph chunking with offsets
 │  ├─ discover.py       # safe recursive walker + hashing
 │  ├─ extract.py        # 25+ format extractors
 │  ├─ categorize.py     # extension → category taxonomy
-│  ├─ scan.py           # incremental scanning, worker thread, progress
+│  ├─ scan.py           # incremental scanning, parallel extraction, progress
 │  ├─ search.py         # FTS5 query builder
 │  ├─ translate.py      # cached translation
 │  ├─ export.py         # CSV / TXT export
-│  └─ watch.py          # fingerprint-polling folder watcher
+│  └─ watch.py          # debounced folder watcher
 └─ ui/
    ├─ theme.py          # dark “deep-space” theme + widget kit
    ├─ icon.py           # runtime-generated brand icon (splash, tray, installer)
@@ -167,18 +227,35 @@ dropLens/
 - **Thread safety:** workers only enqueue to a `queue.Queue`; the GUI main loop
   drains it. No Tk calls from worker threads (deadlock-safe).
 - **SQLite FTS5 `unicode61`** over name/path/content with BM25 + `snippet()`.
-- **AI store:** `docmeta` table holds summaries, tags, notes, favourites and
-  packed float embedding vectors (cosine search in Python, batch-stored).
-- **Incremental diffing** keyed on size+mtime; deletions pruned per root.
+- **Retrieval:** `chunks` (+ `chunks_fts`, kept in sync by triggers) holds
+  page-aware paragraph windows; `chunk_vectors` holds their embeddings (kept apart
+  so re-embedding never rewrites the FTS rows). Both rankings are fused with RRF.
+- **AI store:** `docmeta` holds summaries, tags, notes, favourites and the
+  document-level vector plus the `content_hash` it was computed from, so stale
+  derived data is dropped when a file changes. `ai_jobs` is the durable queue.
+- **Incremental diffing** keyed on size+mtime; deletions pruned per root and
+  cascaded to docs, chunks, vectors, translations and jobs.
 
 ---
+
+## What customers get
+
+See [`docs/CUSTOMER_OFFERING.md`](docs/CUSTOMER_OFFERING.md): the five customer promises, the
+before → after improvement scope of 2.1.0 (retrieval depth, freshness, correctness, surface area)
+and 2.2.0 (extensions, tools, agentic answers), and the explicit list of what we must **not**
+claim yet.
 
 ## Tests
 
 ```powershell
-python -X utf8 tests\test_engine.py   # scan, search, dedup, extraction
-python -X utf8 tests\test_ai.py       # AI service: summary/tags/embeddings/RAG (stubbed client)
-python -X utf8 tests\test_gui.py      # GUI: window boots, indexes, searches, closes
+python -X utf8 tests\test_engine.py     # scan, search, dedup, extraction, CSV export
+python -X utf8 tests\test_ai.py         # AI service: summary/tags/embeddings/RAG (stubbed client)
+python -X utf8 tests\test_retrieval.py  # chunking, hybrid RRF, chunk citations, invalidation, queue
+python -X utf8 tests\test_export.py     # CSV/TXT export + cascade delete (regression)
+python -X utf8 tests\test_extensions.py # plugin discovery, extractor precedence, hooks, config switch
+python -X utf8 tests\test_tools.py      # read-only tools, agent loop, citations, provider converters
+python -X utf8 tests\test_gateway.py    # embedded Respan Gateway: chat/tools/embeddings via loopback
+python -X utf8 tests\test_gui.py        # GUI: window boots, indexes, searches, closes
 ```
 
 ---
@@ -189,7 +266,11 @@ python -X utf8 tests\test_gui.py      # GUI: window boots, indexes, searches, cl
 - [x] Branded splash + onboarding + system tray + professional installer
 - [ ] OCR installer helper + lazy model downloads
 - [ ] Local (offline) translation via lightweight models
-- [ ] Headless CLI (`droplens scan/search/export`) for automation & CI
+- [x] Headless CLI (`python -m dropLens search/scan/ask/stats/export/jobs`) for automation & CI
+- [x] Read-only assistant tools + bounded tool-calling agent (`ask --tools`)
+- [x] Plugin system: extractors, tools and hooks from `<data folder>/plugins`
+- [ ] Assistant tools and plugin status surfaced in the GUI (currently CLI/service only)
+- [x] Chunk-level hybrid retrieval with page-level citations and a durable AI queue
 - [ ] “Pack” folders into a single searchable archive
 - [ ] macOS/Linux builds
 

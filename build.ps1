@@ -3,7 +3,7 @@
 
 param(
     [switch]$Clean,
-    [string]$Version = "1.0.0"
+    [string]$Version = ""
 )
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
@@ -16,6 +16,26 @@ if (-not $py) { throw "Python not found on PATH. Install Python 3.11-3.13 from p
 
 python --version
 if (-not $?) { throw "python --version failed." }
+
+# One source of truth for the release version: the package itself.
+if (-not $Version) {
+    $init = Get-Content -Raw -LiteralPath "dropLens\__init__.py"
+    if ($init -match 'APP_VERSION\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
+        $Version = $Matches[1]
+    } else {
+        throw "Could not read APP_VERSION from dropLens\__init__.py - pass -Version x.y.z."
+    }
+}
+Step "Version $Version"
+
+Step "Stamping build\version_info.txt"
+$quad = (($Version.Split(".")) + @("0", "0", "0"))[0..3] -join ","
+$vi = Get-Content -Raw -LiteralPath "build\version_info.txt"
+$vi = [regex]::Replace($vi, 'filevers=\([\d,\s]+\)', "filevers=($quad)")
+$vi = [regex]::Replace($vi, 'prodvers=\([\d,\s]+\)', "prodvers=($quad)")
+$vi = [regex]::Replace($vi, "(FileVersion', u')[\d.]+", "`${1}$Version")
+$vi = [regex]::Replace($vi, "(ProductVersion', u')[\d.]+", "`${1}$Version")
+Set-Content -LiteralPath "build\version_info.txt" -Value $vi -NoNewline -Encoding UTF8
 
 Step "Installing requirements"
 python -m pip install --upgrade pip
@@ -41,16 +61,17 @@ if (-not $?) { throw "Compilation failed." }
 Step "Running engine smoke test"
 python -X utf8 tests\test_engine.py
 
-Step "Building DropLens.exe with PyInstaller"
-$verAry = $Version.Split(".")
-$nv = "0.$($verAry[0]).$($verAry[1]).$($verAry[2])"
+Step "Building DropLens.exe with PyInstaller ($Version)"
 python -m PyInstaller --noconfirm `
     --onefile --windowed `
     --name "DropLens" `
     --icon "build\appicon.ico" `
     --version-file "build\version_info.txt" `
     --collect-all "tkinterdnd2" `
+    --collect-all "respan_gateway" `
     --hidden-import "pymupdf" `
+    --hidden-import "py7zr" `
+    --hidden-import "rarfile" `
     --exclude-module "test" `
     launcher.py
 

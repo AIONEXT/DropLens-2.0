@@ -5,7 +5,7 @@
 ; Build:  iscc "installer\DropLens.iss"   (or run build_installer.ps1)
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.0"
+  #define MyAppVersion "2.2.0"
 #endif
 #ifndef MyAppOutputDir
   #define MyAppOutputDir "dist"

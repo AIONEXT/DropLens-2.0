@@ -8,3 +8,10 @@ requests>=2.31.0
 tkinterdnd2>=0.4.2
 Pillow>=10.0.0
 pystray>=0.19.5
+# Embedded LLM gateway (loopback, in-process): routing/fallback/translation
+respan-gateway==0.3.0
+# Archive content listings (README advertises 7Z and RAR). rarfile parses RAR
+# headers itself; extracting *compressed* RAR members additionally needs an
+# unrar/bsdtar binary on the machine, which DropLens does not ship.
+py7zr>=0.21
+rarfile>=4.1

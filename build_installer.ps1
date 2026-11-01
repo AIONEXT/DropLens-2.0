@@ -2,10 +2,21 @@
 # Requires Inno Setup 6 (iscc.exe) — https://jrsoftware.org/isinfo.php
 
 param(
-    [string]$Version = "2.0.0"
+    [string]$Version = ""
 )
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
+
+# Same source of truth as build.ps1: the package version.
+if (-not $Version) {
+    $init = Get-Content -Raw -LiteralPath "dropLens\__init__.py"
+    if ($init -match 'APP_VERSION\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
+        $Version = $Matches[1]
+    } else {
+        throw "Could not read APP_VERSION from dropLens\__init__.py - pass -Version x.y.z."
+    }
+}
+Write-Host "Building the DropLens $Version installer" -ForegroundColor Cyan
 
 $iscc = $null
 foreach ($p in @(

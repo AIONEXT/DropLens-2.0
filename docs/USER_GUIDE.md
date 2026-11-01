@@ -38,7 +38,8 @@
 
 ### AI Assistant
 - Ask questions — answers are built **only from your indexed files** and cite
-  the exact sources (double-click a citation to open the file).
+  the exact passage (`[#42] contract.pdf · p.7`). Double-click a citation to
+  open the file and jump the preview to that page.
 - **AI-enrich library** — generates summaries, smart tags and embeddings for
   everything (smallest files first; progress bar; safe to interrupt).
 - **Folder report…** — an executive summary of any scanned folder.
@@ -47,7 +48,20 @@
 - **Duplicates** — identical-byte groups with wasted-space estimates; details +
   CSV export.
 - **Activity** — timestamped log (same lines written to
-  `%LOCALAPPDATA%\DropLens\droplens.log`).
+  `%LOCALAPPDATA%\DropLens\droplens.log`), plus **Network log…** — every
+  outbound request DropLens made, with target and payload size.
+
+## Extensions and tools
+
+- The assistant can call four **read-only** tools — `search_library`,
+  `read_document`, `library_stats`, `list_documents` — and answers with the same
+  `[#42]` citations. It can look things up; it cannot edit, move or delete.
+- **Add your own**: put a Python file in the `plugins` folder inside your data
+  folder. It can teach DropLens a new file format, add a tool, or run a hook
+  after a document is indexed. A plugin that fails is listed with its error and
+  otherwise ignored. See [`EXTENSIONS.md`](EXTENSIONS.md).
+- CLI: `droplens ask --tools "…"`, `droplens tools`, `droplens extensions`
+  (add `--json` for scripts). Setting `plugins_enabled=false` disables plugins.
 
 ## Settings
 
@@ -56,8 +70,14 @@
   Auto-watch / Ignored names** — as before.
 - **Tray controls** — show the system tray icon, close the window to tray,
   notifications after scans.
+- **Offline-only** — blocks every non-local network request (cloud models and
+  translation included). Use it when the answer to “does it phone home?” must be “no”.
 - **AI-enrich automatically after scans** — keep metadata fresh without clicking.
-- **AI Models…** — manage providers (see below).
+- **AI Models…** — manage providers (see below). API keys are sealed with Windows
+  DPAPI, never stored as plaintext.
+- **Plugins** — loaded from `<data folder>/plugins` unless `plugins_enabled` is
+  turned off in the config file. They are optional: with no plugins installed
+  every feature behaves exactly as before.
 
 ## AI Models (Settings → AI Models)
 
@@ -78,6 +98,14 @@
 - **Fast cloud trials:** Groq or OpenRouter with a free API key; add
   `text-embedding-3-small`-style embedding model where offered.
 
+### Respan Gateway (one endpoint, many providers)
+The **Respan Gateway (local)** preset routes DropLens through an LLM gateway embedded in
+the app and bound to loopback. Declare routes and fallback once in `gateway.toml` inside
+the data folder (`listen` stays on `127.0.0.1`), then set **Model** to a route name
+(`smart`) or `provider/model`. Your provider keys stay on this page, or in `env:NAME`
+references inside `gateway.toml` — never in source. Configuration and options:
+[gateway guide](https://github.com/respanai/respan-gateway?utm_source=freebuff&utm_medium=paid&utm_campaign=respan-gateway&bfcid=bfc_1.eyJpZCI6IjlmOGQyYzYyLTYwZjAtNDcxNC04YTRlLWY5MmI4NDk4ODY5MSIsImMiOiIyMDM2ODZkZS1mMzg0LTQ4NTQtYmViNC1hYzBiYWRmNmM1NTUiLCJrIjoiM2IxMGE4YmUtNzgyOS00MmJhLWFmNmEtYmI0YWUxZTRhY2Y4IiwiaWF0IjoxNzkzNDM2MDY0fQ.fL2Dz1C-E1VcSgzJUIuc047M-s1R1huNKjoheyPPBno).
+
 ## Tray (silent operation)
 
 When the tray icon is enabled, DropLens keeps scanning and watching in the
@@ -89,6 +117,8 @@ balloons appear when background jobs complete.
 
 - Your originals are **read-only inputs** — never modified.
 - Indexing, search and translation caches are local.
+- **Offline-only** stops all outbound traffic; the **Network log** (Activity) shows
+  exactly what was sent, to where, and how much — before you ever turn it on.
 - With a **local** model nothing ever leaves your PC; with a **cloud** provider
   only the document excerpts you ask about (or summarize) are sent to that
   provider — never your whole catalogue.

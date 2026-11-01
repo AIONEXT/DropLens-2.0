@@ -81,6 +81,8 @@ def main() -> int:
 
             Onboarding(root, on_finish)
         root.mainloop()
+        from dropLens.ai import gateway as ai_gateway
+        ai_gateway.stop()  # stop the embedded loopback gateway, if it started
         logger.info("DropLens exiting cleanly")
         return 0
     except Exception:

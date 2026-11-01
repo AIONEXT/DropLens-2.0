@@ -6,6 +6,9 @@ Every provider speaks a documented REST API:
     OpenAI, OpenRouter, Groq, Mistral, Together, Azure (OpenAI schema).
   * ``anthropic``          — Anthropic Messages API.
   * ``gemini``             — Google Generative Language API.
+  * ``gateway``            — the embedded Respan Gateway: a loopback endpoint
+    that routes, falls back and translates between all of the above (see
+    :mod:`dropLens.ai.gateway` and ``gateway.toml``).
 
 Embeddings are optional (semantic search lights up only when the active
 provider exposes an embedding model).
@@ -15,9 +18,12 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Optional
 
+from .. import secure
+
 KIND_OPENAI = "openai"
 KIND_ANTHROPIC = "anthropic"
 KIND_GEMINI = "gemini"
+KIND_GATEWAY = "gateway"
 
 PRESETS: dict[str, dict[str, Any]] = {
     "Ollama (local)": {
@@ -108,6 +114,16 @@ PRESETS: dict[str, dict[str, Any]] = {
         "embedding_model": "",
         "hint": "Any OpenAI-compatible server or gateway.",
     },
+    "Respan Gateway (local)": {
+        "kind": KIND_GATEWAY,
+        # resolved at request time to the embedded loopback server
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+        "embedding_model": "",
+        "hint": "Routing, fallback and provider translation from gateway.toml. "
+                "Model = a route name (e.g. smart) or provider/model.",
+    },
 }
 
 
@@ -131,7 +147,8 @@ class AIProvider:
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name, "kind": self.kind, "base_url": self.base_url,
-            "api_key": self.api_key, "model": self.model,
+            # sealed with DPAPI on Windows; plaintext values are migrated here
+            "api_key": secure.seal_field(self.api_key), "model": self.model,
             "embedding_model": self.embedding_model,
         }
 
@@ -141,7 +158,7 @@ class AIProvider:
             name=str(d.get("name", "Provider")),
             kind=str(d.get("kind", KIND_OPENAI)),
             base_url=str(d.get("base_url", "")),
-            api_key=str(d.get("api_key", "")),
+            api_key=secure.open_field(str(d.get("api_key", ""))),
             model=str(d.get("model", "")),
             embedding_model=str(d.get("embedding_model", "")),
         )
@@ -152,8 +169,25 @@ class AIProvider:
 
     @property
     def is_local(self) -> bool:
-        host = (self.base_url or "").lower()
-        return "localhost" in host or "127.0.0.1" in host or ":11434" in host
+        from .. import net
+        if not self.base_url:
+            return False
+        return net.is_local_url(self.base_url) or ":11434" in self.base_url.lower()
+
+    @property
+    def prompt_char_budget(self) -> int:
+        """Chars of retrieved context one answer may carry.
+
+        Local models usually run with a 4k-8k token window; cloud models take
+        far more, but spending it all on context degrades answers and costs money.
+        """
+        if self.is_local:
+            return 16_000
+        if self.kind == KIND_ANTHROPIC:
+            return 120_000
+        if self.kind == KIND_GEMINI:
+            return 100_000
+        return 60_000
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<AIProvider {self.name} ({self.kind}) model={self.model}>"

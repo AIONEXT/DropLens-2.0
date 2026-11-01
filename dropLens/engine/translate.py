@@ -13,6 +13,7 @@ import time
 
 import requests
 
+from .. import net
 from .db import Catalog
 
 GTX_URL = "https://translate.googleapis.com/translate_a/single"
@@ -101,6 +102,7 @@ class Translator:
         return chunks
 
     def _translate_chunk(self, chunk: str, lang: str) -> str:
+        net.check(GTX_URL)
         try:
             resp = self._session.get(
                 GTX_URL,
@@ -109,8 +111,11 @@ class Translator:
             )
             resp.raise_for_status()
             payload = resp.json()
+        except net.EgressBlocked as exc:
+            raise TranslationError(str(exc)) from exc
         except Exception as exc:
             raise TranslationError(f"Translation request failed: {exc}") from exc
+        net.log_egress("translate", GTX_URL, len(chunk))
         try:
             sentences = payload[0]
             parts = []

@@ -98,12 +98,18 @@ class SettingsDialog(tk.Toplevel):
         ttk.Checkbutton(frm, text="Run AI enrichment automatically after scans", variable=self.var_autoai).grid(
             row=21, column=0, columnspan=2, sticky="w", **pad)
 
+        ttk.Label(frm, text="Privacy", font=("", 9, "bold")).grid(row=22, column=0, sticky="w", **pad)
+        self.var_offline = tk.BooleanVar(value=bool(self.cfg.get("offline_only", False)))
+        ttk.Checkbutton(frm, text="Offline-only: block every non-local network request",
+                        variable=self.var_offline).grid(row=23, column=0, columnspan=2,
+                                                        sticky="w", **pad)
+
         btnrow = ttk.Frame(frm)
-        btnrow.grid(row=22, column=0, columnspan=2, sticky="ew", pady=8)
+        btnrow.grid(row=24, column=0, columnspan=2, sticky="ew", pady=8)
         ttk.Button(btnrow, text="AI Models…", command=self._open_ai, style="Ghost.TButton").pack(side="left")
 
         btns = ttk.Frame(frm)
-        btns.grid(row=23, column=0, columnspan=2, sticky="e", pady=4)
+        btns.grid(row=25, column=0, columnspan=2, sticky="e", pady=4)
         ttk.Button(btns, text="Save", command=self._save).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left")
 
@@ -139,6 +145,7 @@ class SettingsDialog(tk.Toplevel):
             close_to_tray=bool(self.var_close_tray.get()),
             notify_scan_done=bool(self.var_notify.get()),
             ai_auto_enrich=bool(self.var_autoai.get()),
+            offline_only=bool(self.var_offline.get()),
         )
         self.store.save(self.cfg)
         self.on_saved(self.cfg)
@@ -459,7 +466,7 @@ class AISettingsDialog(tk.Toplevel):
             row=14, column=0, sticky="w", pady=(12, 0))
         self.var_kind = tk.StringVar(value="openai")
         tk.Combobox(container, textvariable=self.var_kind, state="readonly",
-                    values=("openai", "anthropic", "gemini")).grid(row=15, column=0, sticky="w")
+                    values=("openai", "anthropic", "gemini", "gateway")).grid(row=15, column=0, sticky="w")
 
         row_save = tk.Frame(container, bg="#161b26")
         row_save.grid(row=16, column=0, sticky="e", pady=14)

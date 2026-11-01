@@ -29,7 +29,10 @@ powershell -ExecutionPolicy Bypass -File .\build_installer.ps1   # needs Inno Se
 3. Generates `build\appicon.ico` from source artwork (pure Python/Pillow).
 4. Compiles every source module (catches syntax errors early).
 5. Runs the engine smoke test (`tests\test_engine.py`).
-6. Invokes PyInstaller on `launcher.py` (root-level launcher that imports the
+6. Reads `APP_VERSION` from `dropLens/__init__.py` (the single source of truth for the
+   release version, unless `-Version` overrides it) and stamps `build\version_info.txt`
+   with it, so the exe's file properties always match the app.
+7. Invokes PyInstaller on `launcher.py` (root-level launcher that imports the
    `dropLens` package — avoids relative-import issues when frozen):
 
 ```text
@@ -37,6 +40,7 @@ powershell -ExecutionPolicy Bypass -File .\build_installer.ps1   # needs Inno Se
 --name DropLens
 --collect-all tkinterdnd2        (drag & drop binaries)
 --hidden-import pymupdf
+--hidden-import py7zr --hidden-import rarfile   (7Z / RAR listings)
 ```
 
 The result is a fully self-contained `dist\DropLens.exe` (~100 MB with Python,
@@ -70,8 +74,8 @@ launches the app. Uninstalling removes the app but **keeps your
 ## Release build (recommended, reproducible)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1 -Version 2.0.0 -Clean
-powershell -ExecutionPolicy Bypass -File .\build_installer.ps1 -Version 2.0.0
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -Version 2.2.0 -Clean
+powershell -ExecutionPolicy Bypass -File .\build_installer.ps1 -Version 2.2.0
 ```
 
 `-Clean` removes the previous `dist/` and PyInstaller intermediates only; the

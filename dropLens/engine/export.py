@@ -6,7 +6,7 @@ import os
 import time
 from typing import Iterable, Optional
 
-from .db import Catalog
+from .db import Catalog, row_get
 from .discover import human_size
 
 _COLUMNS = [
@@ -26,10 +26,10 @@ def _row_to_dict(row) -> dict:
         "size_human": human_size(row["size"]),
         "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["mtime"])),
         "created": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["ctime"])) if row["ctime"] else "",
-        "hash_md5": row["hash"] or row.get("file_hash") or "",
+        "hash_md5": row_get(row, "hash", "") or row_get(row, "file_hash", "") or "",
         "duplicate_id": row["dup_id"] or "",
         "status": row["status"],
-        "content_preview": (row.get("content") or "")[:800].replace("\n", " "),
+        "content_preview": (row_get(row, "content", "") or "")[:800].replace("\n", " "),
     }
 
 
@@ -83,8 +83,9 @@ def export_text(catalog: Catalog, doc_id: int, out_path: str, translated: Option
     if translated:
         lines.append("== TRANSLATION ==")
         lines.append(translated)
-    if row.get("content"):
+    content = row_get(row, "content", "")
+    if content:
         lines.append("== ORIGINAL CONTENT (index copy) ==")
-        lines.append(row["content"])
+        lines.append(str(content))
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))

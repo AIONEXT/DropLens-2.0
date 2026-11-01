@@ -17,12 +17,14 @@ from tkinter import filedialog, messagebox, ttk
 
 from .. import APP_NAME, APP_TAGLINE, APP_VERSION
 from ..config import Config, ConfigStore
+from .. import net
 from ..engine.categorize import all_categories, category_label
-from ..engine.db import Catalog
+from ..engine.chunk import PAGE_MARK
+from ..engine.db import Catalog, row_get
 from ..engine.discover import human_size
 from ..engine.export import export_catalogue, export_search_results
 from ..engine.scan import ScanManager
-from ..engine.search import build_match
+from ..engine.search import ResultCursor, build_match
 from ..engine.translate import Translator
 from ..engine.watch import FolderWatcher
 from .dialogs import (
@@ -73,10 +75,14 @@ class DropLensApp:
 
         self._results_meta: dict = {"offset": 0}
         self._results_items: dict[str, int] = {}
+        self._ai_stop_flag = False
+        self._cite_payload: dict[str, dict] = {}
+        net.configure(self.cfg.offline_only, sink=self.db.log_egress_entry)
 
         # AI
         from ..ai.svc import AIService
-        self.ai = AIService(self.db, config=lambda: self.cfg.ai_config())
+        self.ai = AIService(self.db, config=lambda: self.cfg.ai_config(),
+                            settings=lambda: self.cfg)
 
         self._build_layout()
         self._bind_drops()
@@ -103,6 +109,7 @@ class DropLensApp:
         self.scanner = ScanManager(self.db, self.cfg, on_progress=self._enqueue)
         self.translator = Translator(self.db)
         self.ai.catalog = self.db
+        net.configure(self.cfg.offline_only, sink=self.db.log_egress_entry)
         self.refresh_all()
 
     def boot_refresh(self) -> None:
@@ -451,6 +458,7 @@ class DropLensApp:
                  font=("Segoe UI", 12, "bold")).pack(side="left")
         make_button(bar, "AI-enrich library", self._ai_enrich_all, "Accent.TButton").pack(
             side="right", padx=4)
+        make_button(bar, "■ Stop", self._ai_stop, "Danger.TButton").pack(side="right", padx=4)
         make_button(bar, "Folder report…", self._folder_report_dialog).pack(side="right", padx=4)
 
         body = tk.Frame(t, bg=T.BG)
@@ -495,8 +503,11 @@ class DropLensApp:
         cites.grid(row=0, column=1, sticky="nsew", padx=(6, 0), rowspan=3)
         tk.Label(cites, text="Cited files", bg=T.CARD, fg=T.MUTED,
                  font=font(9, True)).pack(anchor="w", padx=10, pady=(10, 4))
-        self.cite_tree = ttk.Treeview(cites, columns=("f",), show="tree", height=10)
-        self.cite_tree.heading("#0", text="")
+        self.cite_tree = ttk.Treeview(cites, columns=("Page",), show="tree headings", height=10)
+        self.cite_tree.heading("#0", text="Source")
+        self.cite_tree.heading("Page", text="Page")
+        self.cite_tree.column("#0", width=190)
+        self.cite_tree.column("Page", width=54, anchor="center")
         self.cite_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.cite_tree.bind("<Double-1>", lambda e: self._open_selected_cite())
 
@@ -593,9 +604,15 @@ class DropLensApp:
         threading.Thread(target=work, daemon=True).start()
 
     def _open_selected_cite(self) -> None:
-        sel = self.cite_tree.selection()
-        for iid in sel:
-            path = str(self.cite_tree.item(iid, "values")[0])
+        for iid in self.cite_tree.selection():
+            cite = self._cite_payload.get(iid)
+            if not cite:
+                continue
+            doc_id = cite.get("doc_id")
+            if doc_id:
+                self._show_preview(int(doc_id), focus=cite)
+                self.show_page("Search")
+            path = str(cite.get("path") or "")
             if path and os.path.exists(path):
                 open_path(path)
 
@@ -627,6 +644,7 @@ class DropLensApp:
         tk.Label(top, text="Session activity", bg=T.BG, fg=T.TEXT,
                  font=("Segoe UI", 11, "bold")).pack(side="left")
         make_button(top, "Clear log", self._clear_log).pack(side="right")
+        make_button(top, "Network log…", self._show_egress_log).pack(side="right", padx=6)
         self.log = tk.Text(t, wrap="word", bg=T.PANEL, fg="#d8e2ec", state="disabled",
                            font=("Consolas", 9), padx=10, pady=8, relief="flat", highlightthickness=0)
         lv = ttk.Scrollbar(t, orient="vertical", command=self.log.yview)
@@ -638,6 +656,42 @@ class DropLensApp:
         self.log.tag_configure("error", foreground=T.DANGER)
         self.log.tag_configure("ok", foreground=T.OK)
         self._log("info", f"{APP_NAME} {APP_VERSION} started — {APP_TAGLINE}")
+
+    def _show_egress_log(self) -> None:
+        """What left this machine: provider calls, model listings, translations."""
+        dlg = tk.Toplevel(self.master)
+        dlg.title("What leaves this machine")
+        dlg.geometry("720x420")
+        dlg.configure(bg=T.CARD)
+        dlg.transient(self.master)
+        tk.Label(dlg, text="Every outbound request from this library, newest first.",
+                 bg=T.CARD, fg=T.MUTED, font=font(9)).pack(anchor="w", padx=10, pady=(10, 4))
+        cols = ("When", "Kind", "Chars", "Target")
+        tree = ttk.Treeview(dlg, columns=cols, show="headings")
+        for c, w in zip(cols, (140, 90, 80, 380)):
+            tree.heading(c, text=c)
+            tree.column(c, width=w, anchor="w" if c == "Target" else "center",
+                        stretch=(c == "Target"))
+        tree.pack(fill="both", expand=True, padx=10)
+        try:
+            rows = self.db.egress_rows(200)
+        except Exception:  # noqa: BLE001
+            rows = []
+        for r in rows:
+            tree.insert("", "end", values=(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"])),
+                                           r["kind"], f"{int(r['chars']):,}", r["target"]))
+        if not rows:
+            tree.insert("", "end", values=("—", "none", "0", "nothing has left this machine"))
+
+        def clear():
+            self.db.clear_egress()
+            tree.delete(*tree.get_children())
+            tree.insert("", "end", values=("—", "none", "0", "log cleared"))
+
+        row = tk.Frame(dlg, bg=T.CARD)
+        row.pack(fill="x", padx=10, pady=8)
+        make_button(row, "Clear log", clear).pack(side="right")
+        make_button(row, "Close", dlg.destroy).pack(side="right", padx=6)
 
     def _clear_log(self) -> None:
         self.log.configure(state="normal")
@@ -778,11 +832,12 @@ class DropLensApp:
                 self._enqueue({"kind": "ai_progress", "done": done, "total": total,
                                "pct": int(100 * done / max(1, total))})
             try:
-                result = self.ai.index_ai(progress, stop=lambda: False)
+                result = self.ai.index_ai(progress, stop=lambda: self._ai_stop_flag)
                 self._enqueue({"kind": "ai_enrich_done", "text": result})
             except Exception as exc:
                 self._enqueue({"kind": "ai_fail", "msg": str(exc)})
 
+        self._ai_stop_flag = False
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------------
@@ -936,9 +991,8 @@ class DropLensApp:
 
     def _ai_enriched_count(self) -> int:
         try:
-            row = self.db.execute("SELECT COUNT(*) AS n FROM docmeta WHERE summary IS NOT NULL AND summary != ''").fetchone()
-            return int(row["n"]) if row else 0
-        except Exception:
+            return self.db.ai_enriched_count()
+        except Exception:  # noqa: BLE001 - stats must never break the refresh
             return 0
 
     def refresh_tags(self) -> None:
@@ -1006,7 +1060,11 @@ class DropLensApp:
     # ------------------------------------------------------------------
     def _semantic_toggle(self) -> None:
         on = self.semantic_var.get()
-        if on and not self.ai.provider().has_embeddings:
+        try:
+            has_embeddings = self.ai.provider().has_embeddings
+        except Exception:  # noqa: BLE001 - not configured yet
+            has_embeddings = False
+        if on and not has_embeddings:
             self.semantic_var.set(False)
             messagebox.showwarning(
                 "Semantic search",
@@ -1064,7 +1122,7 @@ class DropLensApp:
 
         def work():
             try:
-                pairs = self.ai.semantic_search(term, top_k=30)
+                pairs = self.ai.semantic_search(term, top_k=30, category=category)
                 rows = []
                 for doc_id, score in pairs:
                     row = self.db.get(doc_id)
@@ -1080,35 +1138,36 @@ class DropLensApp:
 
     def _do_fts_search(self, expr, term, mode, category, reset=True, limit_page=300) -> None:
         tree = self.results_tree
+        want_name = mode in ("all", "name")
         if reset:
             for iid in tree.get_children():
                 tree.delete(iid)
-            self._results_meta = {"offset": 0, "expr": expr, "term": term, "mode": mode,
-                                  "category": category, "total": 0}
-            name_results = self.db.name_search(term, category=category, limit=limit_page, offset=0) \
-                if mode in ("all", "name") else []
-            fts_results = self.db.search(expr, category=category, limit=limit_page, offset=0)
-            merged = self._merge_results(name_results, fts_results)
-            self._results_meta["total"] = len(merged)
-            self._results_meta["offset"] = max(0, len(merged) - 1)
+            # page 1 seeds both channels; later pages walk the same cursor, so a
+            # row is served exactly once across "Load more" presses (H1)
+            name_rows = self.db.name_search(term, category=category,
+                                            limit=limit_page, offset=0) \
+                if want_name else []
+            fts_rows = self.db.search(expr, category=category, limit=limit_page, offset=0)
+            cursor = ResultCursor(page=limit_page)
+            merged = cursor.seed(name_rows, fts_rows, name_enabled=want_name)
+            self._results_meta = {"expr": expr, "term": term, "mode": mode,
+                                  "category": category, "offset": cursor.served,
+                                  "total": cursor.served, "cursor": cursor}
             self._fill(merged)
-        else:
-            offset = self._results_meta.get("offset", 0) + 1
-            more = self.db.search(expr, category=category, limit=limit_page, offset=offset)
-            self._results_meta["offset"] += len(more)
+            return
+        cursor = self._results_meta.get("cursor")
+        if cursor is None:
+            return
+        more = cursor.next_page(
+            lambda off, lim: self.db.name_search(term, category=category,
+                                                 limit=lim, offset=off)
+            if want_name else [],
+            lambda off, lim: self.db.search(expr, category=category,
+                                            limit=lim, offset=off),
+        )
+        self._results_meta["offset"] = cursor.served
+        if more:
             self._fill(more)
-
-    @staticmethod
-    def _merge_results(name_results, fts_results):
-        seen: set[int] = set()
-        out = []
-        for r in list(name_results) + list(fts_results):
-            iid = int(r["id"])
-            if iid in seen:
-                continue
-            seen.add(iid)
-            out.append(r)
-        return out
 
     def _fill(self, rows) -> None:
         tree = self.results_tree
@@ -1117,14 +1176,7 @@ class DropLensApp:
             self._results_items[iid] = int(r["id"])
             if len(tree.get_children()) >= 5000:
                 break
-            meta = None
-            try:
-                meta = self.db.get_meta(int(r["id"]))
-            except Exception:
-                meta = None
-            star = ""
-            if meta and meta["favorite"]:
-                star = "★ "
+            star = "★ " if row_get(r, "favorite", 0) else ""
             if "__score" in r:
                 name_col = f"{star}{r['name']}  ({float(r['__score']):.2f})"
             else:
@@ -1153,12 +1205,7 @@ class DropLensApp:
         for r in recent:
             iid = str(r["id"])
             self._results_items[iid] = int(r["id"])
-            meta = None
-            try:
-                meta = self.db.get_meta(int(r["id"]))
-            except Exception:
-                meta = None
-            star = "★ " if (meta and meta["favorite"]) else ""
+            star = "★ " if row_get(r, "favorite", 0) else ""
             tree.insert("", "end", iid=iid,
                         values=(star + r["name"], category_label(r["category"]), human_size(r["size"]),
                                 time.strftime("%Y-%m-%d %H:%M", time.localtime(r["mtime"])), r["path"]))
@@ -1194,9 +1241,9 @@ class DropLensApp:
             return
         self._show_preview(ids[0])
 
-    def _show_preview(self, doc_id: int) -> None:
+    def _show_preview(self, doc_id: int, focus: dict | None = None) -> None:
         row = self.db.get(doc_id)
-        meta = self.db.get_meta(doc_id) or {}
+        meta = self.db.get_meta(doc_id)
         self.preview.configure(state="normal")
         self.preview.delete("1.0", "end")
         self.var_insight_name.set("" if not row else str(row["name"]))
@@ -1207,10 +1254,10 @@ class DropLensApp:
             if row["dup_id"]:
                 sub += " · DUPLICATE"
             if meta:
-                tags = [t for t in str(meta.get("tags") or "").split(",") if t.strip()]
+                tags = [t for t in str(row_get(meta, "tags", "")).split(",") if t.strip()]
                 if tags:
                     sub += "\nTags: " + ", ".join(f"#{t}" for t in tags[:10])
-                if meta.get("favorite"):
+                if row_get(meta, "favorite", 0):
                     sub += "\n★ favorite"
         self.var_insight_sub.set(sub)
         if not row:
@@ -1219,7 +1266,7 @@ class DropLensApp:
         terms = []
         if self.term_var.get().strip():
             terms = _re.findall(r"[\w@.\-\u0080-\uffff]+", self.term_var.get().strip())
-        content = (row["content"] or "").strip()
+        content = (row_get(row, "content", "") or "").replace(PAGE_MARK, "\n").strip()
         if not content:
             if row["status"] == "no_content" or row["status"] == "ocr_unavailable":
                 self.preview.insert("end", "No extractable text (indexed by name/size only).", "dim")
@@ -1232,15 +1279,42 @@ class DropLensApp:
                 if listing:
                     self.preview.insert("end", listing)
         else:
-            if meta and meta.get("summary"):
+            summary = row_get(meta, "summary", "")
+            if summary:
                 self.preview.insert("end", "⟢ AI SUMMARY\n", "head")
-                self.preview.insert("end", str(meta["summary"]) + "\n\n", "good")
+                self.preview.insert("end", str(summary) + "\n\n", "good")
             shown = content[: int(self.cfg.get("preview_chars", 20000))]
             self.preview.insert("end", shown)
             self._apply_highlight(terms)
             if len(content) > len(shown):
                 self.preview.insert("end", "\n… preview truncated")
+        self._focus_preview(focus)
         self.preview.configure(state="disabled")
+
+    def _focus_preview(self, focus: dict | None) -> None:
+        """Scroll the preview to a cited passage and highlight it."""
+        if not focus:
+            return
+        snippet = str(focus.get("snippet") or "")[:80]
+        idx = ""
+        if snippet:
+            try:
+                idx = self.preview.search(snippet, "1.0", stopindex="end", nocase=True)
+            except tk.TclError:
+                idx = ""
+        if not idx and focus.get("start_char") is not None:
+            try:
+                idx = self.preview.index(f"1.0 + {int(focus['start_char'])}c")
+            except (tk.TclError, ValueError, TypeError):
+                idx = ""
+        if not idx:
+            return
+        try:
+            end = self.preview.index(f"{idx} + {max(1, len(snippet))}c")
+        except tk.TclError:
+            return
+        self.preview.tag_add("hl", idx, end)
+        self.preview.see(idx)
 
     def _apply_highlight(self, terms) -> None:
         for t in terms:
@@ -1283,7 +1357,8 @@ class DropLensApp:
             return
         for fid in ids:
             self.db.toggle_favorite(fid)
-        self._log("info", "Marked favorite" if self.db.get_meta(ids[0]).get("favorite") else "Unmarked favorite")
+        self._log("info", "Marked favorite" if row_get(self.db.get_meta(ids[0]), "favorite", 0)
+                 else "Unmarked favorite")
         if self.term_var.get().strip():
             self.do_search()
         else:
@@ -1295,7 +1370,7 @@ class DropLensApp:
             return
         fid = ids[0]
         row = self.db.get(fid)
-        if not row or not row.get("content"):
+        if not row or not row_get(row, "content"):
             messagebox.showinfo(APP_NAME, "This item has no extractable text to translate.")
             return
         TranslateDialog(self.master, self.translator, self.db, fid, row["content"],
@@ -1381,7 +1456,7 @@ class DropLensApp:
         txt = tk.Text(dlg, bg=T.PANEL, fg=T.TEXT, insertbackground=T.TEXT,
                       font=("Segoe UI", 10), relief="flat", highlightthickness=0)
         txt.pack(fill="both", expand=True, padx=10, pady=10)
-        txt.insert("1.0", str(meta.get("notes") or ""))
+        txt.insert("1.0", str(row_get(meta, "notes", "")))
 
         def save():
             self.db.upsert_meta(doc_id, notes=txt.get("1.0", "end").strip())
@@ -1432,10 +1507,21 @@ class DropLensApp:
         threading.Thread(target=work, daemon=True).start()
 
     def _render_cites(self, cites: list) -> None:
+        """Render citations as chunk-level sources (name + page)."""
         for iid in self.cite_tree.get_children():
             self.cite_tree.delete(iid)
-        for name, path in cites:
-            self.cite_tree.insert("", "end", iid=path or name, values=(path or name,))
+        self._cite_payload = {}
+        for i, cite in enumerate(cites or []):
+            if not isinstance(cite, dict):
+                name, path = (list(cite) + ["", ""])[:2] if isinstance(cite, (list, tuple)) \
+                    else (str(cite), "")
+                cite = {"name": name, "path": path, "label": name, "page": None}
+            iid = f"c{i}"
+            self._cite_payload[iid] = cite
+            page = cite.get("page")
+            self.cite_tree.insert("", "end", iid=iid,
+                                  values=(cite.get("name") or cite.get("label", ""),
+                                          f"p.{page}" if page else ""))
 
     # ------------------------------------------------------------------
     # watch + settings + tray
@@ -1503,6 +1589,7 @@ class DropLensApp:
                 self._reopen_db()
                 self._log("info", "Data directory changed — library reopened.")
             self.scanner.config = cfg
+            net.configure(cfg.offline_only, sink=self.db.log_egress_entry)
             self.auto_watch_var.set(bool(cfg.get("watch_enabled")))
             if cfg.get("watch_enabled"):
                 self._start_watcher()

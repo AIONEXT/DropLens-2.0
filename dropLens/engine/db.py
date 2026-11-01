@@ -1,23 +1,38 @@
-"""SQLite file catalogue with FTS5 full-text search.
+"""SQLite file catalogue: FTS5 search, chunk retrieval, AI state, job queue.
 
 Schema
 ------
-files        one row per indexed file / folder (metadata + status)
-docs         FTS5 virtual table holding name, path and extracted content
-translations cached machine translations of extracted content
-roots        monitored folder roots
+files          one row per indexed file / folder (metadata + status)
+docs           FTS5 virtual table holding name, path and extracted content
+chunks         paragraph-level windows of extracted text (+ page, offsets)
+chunks_fts     FTS5 index over ``chunks`` (kept in sync by triggers)
+chunk_vectors  one embedding per chunk (kept apart from ``chunks`` so that
+               re-embedding never rewrites FTS rows)
+translations   cached machine translations of extracted content
+docmeta        derived AI data: summary, tags, notes, favourite, doc vector,
+               and the content hash those were computed from
+ai_jobs        durable enrichment queue (summary / tags / embed)
+egress         local log of outbound network requests
+roots          monitored folder roots
+prefs          key/value application preferences
 
 Thread safety: a single connection guarded by an RLock. Scans write from
 worker threads, the GUI reads from the main thread.
 """
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import re
 import sqlite3
 import threading
 import time
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
+
+from . import migrations
+
+log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS roots (
@@ -29,7 +44,7 @@ CREATE TABLE IF NOT EXISTS roots (
 );
 
 CREATE TABLE IF NOT EXISTS files (
-    id       INTEGER PRIMARY KEY,
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
     path     TEXT UNIQUE NOT NULL,
     name     TEXT NOT NULL,
     ext      TEXT,
@@ -87,20 +102,39 @@ CREATE INDEX IF NOT EXISTS idx_files_cat    ON files(category);
 _RE_ESCAPE = re.compile(r'["*^]')
 
 
-def _common_prefix(a: str, b: str) -> str:
-    """Return the longest common directory prefix of two absolute paths."""
-    a = os.path.normcase(os.path.normpath(a))
-    b = os.path.normcase(os.path.normpath(b))
-    if a == b:
-        return a
-    ap = a.split(os.sep)
-    bp = b.split(os.sep)
-    out = []
-    for x, y in zip(ap, bp):
-        if x != y:
-            break
-        out.append(x)
-    return os.sep.join(out) or os.sep
+def row_get(row: Any, key: str, default: Any = None) -> Any:
+    """Read *key* from a ``sqlite3.Row``, a dict or None — without crashing.
+
+    ``sqlite3.Row`` has no ``.get()``; every boundary that mixes dicts and rows
+    goes through this helper instead.
+    """
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        value = row.get(key, default)
+        return default if value is None else value
+    try:
+        keys = row.keys()
+    except AttributeError:
+        return default
+    if key not in keys:
+        return default
+    try:
+        value = row[key]
+    except (IndexError, KeyError):
+        return default
+    return default if value is None else value
+
+
+def content_hash(text: str, name: str = "", size: int = 0) -> str:
+    """Stable fingerprint of a document's indexed text (detects staleness)."""
+    h = hashlib.sha1()
+    h.update((text or "").encode("utf-8", "replace"))
+    h.update(b"\x00")
+    h.update((name or "").encode("utf-8", "replace"))
+    h.update(b"\x00")
+    h.update(str(int(size or 0)).encode("ascii"))
+    return h.hexdigest()
 
 
 class Catalog:
@@ -117,6 +151,7 @@ class Catalog:
         self._conn.execute("PRAGMA busy_timeout=15000")
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self.schema_version = migrations.apply(self._conn)
             self._conn.commit()
 
     # -- transactional helpers -------------------------------------------
@@ -151,7 +186,7 @@ class Catalog:
     def add_root(self, path: str) -> int:
         path = os.path.abspath(path)
         now = time.time()
-        cur = self.execute(
+        self.execute(
             "INSERT INTO roots(path, added_at) VALUES(?, ?) "
             "ON CONFLICT(path) DO UPDATE SET added_at=excluded.added_at",
             (path, now),
@@ -179,7 +214,8 @@ class Catalog:
 
     def touch_root_scan(self, path: str, status: str = "indexed") -> None:
         self.execute(
-            "UPDATE roots SET last_scan=?, status=? WHERE path=?", (time.time(), status, os.path.abspath(path))
+            "UPDATE roots SET last_scan=?, status=? WHERE path=?",
+            (time.time(), status, os.path.abspath(path)),
         )
         self.commit()
 
@@ -210,9 +246,7 @@ class Catalog:
         return row is not None
 
     def hash_exists(self, digest: str) -> int:
-        row = self.execute(
-            "SELECT id FROM files WHERE hash=? LIMIT 1", (digest,)
-        ).fetchone()
+        row = self.execute("SELECT id FROM files WHERE hash=? LIMIT 1", (digest,)).fetchone()
         return int(row["id"]) if row else 0
 
     def upsert_file(self, rec: dict[str, Any]) -> int:
@@ -230,30 +264,57 @@ class Catalog:
         self.execute(sql, vals)
         return self.resolve_id(rec["path"]) or 0
 
-    def upsert_doc(self, doc_id: int, name: str, path: str, content: str) -> None:
+    def save_doc(self, doc_id: int, name: str, path: str, text: str,
+                 digest: str | None = None) -> bool:
+        """Replace the searchable copy of a document.
+
+        Returns True when the text changed, in which case every derived AI
+        artifact (summary, tags, doc vector, chunks) is invalidated: today a
+        file edited on disk keeps advertising its old summary forever.
+        """
         if doc_id <= 0:
-            return
+            return False
+        digest = digest or content_hash(text, name)
         self.execute("DELETE FROM docs WHERE doc_id=?", (doc_id,))
         self.execute(
             "INSERT INTO docs(doc_id, name, path, content) VALUES(?,?,?,?)",
-            (doc_id, name, path, content),
+            (doc_id, name, path, text or ""),
         )
-
-    def pending_inserts_commit(self) -> None:
-        pass
+        row = self.execute("SELECT content_hash, summary, tags, embedding FROM docmeta "
+                           "WHERE doc_id=?", (doc_id,)).fetchone()
+        if row is not None and row["content_hash"] == digest:
+            return False
+        invalidated = row is not None and (
+            row["summary"] is not None or row["tags"] is not None or row["embedding"] is not None
+        )
+        self.execute(
+            "INSERT INTO docmeta(doc_id, favorite, content_hash, meta_ts) VALUES(?,0,?,?) "
+            "ON CONFLICT(doc_id) DO UPDATE SET content_hash=excluded.content_hash, "
+            "  summary=NULL, summary_lang=NULL, tags=NULL, ai_status=NULL, embedding=NULL, "
+            "  embed_model=NULL, embed_dim=NULL, chunk_hash=NULL, meta_ts=excluded.meta_ts",
+            (doc_id, digest, time.time()),
+        )
+        self.delete_chunks(doc_id)
+        if invalidated:
+            log.info("AI artifacts invalidated for doc %s (content changed)", doc_id)
+        return True
 
     def mark_deleted(self, ids: Iterable[int]) -> int:
-        id_list = list(ids)
+        """Remove catalogue rows and everything derived from them."""
+        id_list = [int(i) for i in ids if i]
         if not id_list:
             return 0
-        # delete in chunks to respect SQLite variable limits
         total = 0
-        for i in range(0, len(id_list), 900):
-            chunk = id_list[i:i + 900]
+        for i in range(0, len(id_list), 500):
+            chunk = id_list[i:i + 500]
             marks = ",".join("?" * len(chunk))
+            self.execute(f"DELETE FROM chunk_vectors WHERE doc_id IN ({marks})", chunk)
+            self.execute(f"DELETE FROM chunks WHERE doc_id IN ({marks})", chunk)
+            self.execute(f"DELETE FROM docs WHERE doc_id IN ({marks})", chunk)
+            self.execute(f"DELETE FROM docmeta WHERE doc_id IN ({marks})", chunk)
+            self.execute(f"DELETE FROM translations WHERE doc_id IN ({marks})", chunk)
+            self.execute(f"DELETE FROM ai_jobs WHERE doc_id IN ({marks})", chunk)
             self.execute(f"DELETE FROM files WHERE id IN ({marks})", chunk)
-            for c in chunk:
-                self.execute("DELETE FROM docs WHERE doc_id=?", (c,))
             total += len(chunk)
         return total
 
@@ -278,6 +339,13 @@ class Catalog:
     _SNIP_B = "\x01"
     _SNIP_E = "\x02"
 
+    _HIT_COLUMNS = (
+        "f.id, f.name, f.path, f.ext, f.size, f.mtime, f.category, f.kind, f.status, "
+        "f.hash AS file_hash, f.dup_id, "
+        "COALESCE(m.favorite, 0) AS favorite, "
+        "CASE WHEN m.summary IS NULL OR m.summary='' THEN 0 ELSE 1 END AS has_summary"
+    )
+
     def search(
         self,
         expr: str,
@@ -288,11 +356,11 @@ class Catalog:
     ) -> list[sqlite3.Row]:
         clause = self._file_clause(category, root)
         sql = (
-            "SELECT f.id, f.name, f.path, f.ext, f.size, f.mtime, f.category, f.kind, f.status, "
-            "       f.hash AS file_hash, f.dup_id, "
+            "SELECT " + self._HIT_COLUMNS + ", "
             "       snippet(docs, 3, ?, ?, ' … ', 20) AS snip, "
             "       bm25(docs) AS rank "
             "FROM docs JOIN files f ON f.id = docs.doc_id "
+            "LEFT JOIN docmeta m ON m.doc_id = f.id "
             "WHERE docs MATCH ?" + clause + " "
             "ORDER BY bm25(docs) LIMIT ? OFFSET ?"
         )
@@ -301,26 +369,14 @@ class Catalog:
         params += [limit, offset]
         return self.execute(sql, params).fetchall()  # type: ignore[return-value]
 
-    def search_count(self, expr: str, category: str = "", root: str = "") -> int:
-        sql = (
-            "SELECT COUNT(*) AS n FROM docs JOIN files f ON f.id=docs.doc_id "
-            "WHERE docs MATCH ?" + self._file_clause(category, root)
-        )
-        params: list[Any] = [expr] + self._file_clause_params(category, root)
-        row = self.execute(sql, params).fetchone()
-        return int(row["n"]) if row else 0
-
     @staticmethod
     def _file_clause(category: str, root: str) -> str:
-        parts = [" AND "]
         clauses = []
         if root:
             clauses.append("f.root = ?")
         if category:
             clauses.append("f.category = ?")
-        if clauses:
-            parts.append(" AND ".join(clauses))
-        return parts[0] + (" AND ".join(clauses) if clauses else "1=1")
+        return " AND " + (" AND ".join(clauses) if clauses else "1=1")
 
     @staticmethod
     def _file_clause_params(category: str, root: str) -> list[Any]:
@@ -343,72 +399,187 @@ class Catalog:
         params: list[Any] = [like, like]
         clause = ""
         if root:
-            clause += " AND root = ?"
+            clause += " AND f.root = ?"
             params.append(root)
         if category:
-            clause += " AND category = ?"
+            clause += " AND f.category = ?"
             params.append(category)
         sql = (
-            "SELECT id, name, path, ext, size, mtime, category, kind, status, hash AS file_hash, dup_id, "
-            "  '' AS snip, 0 AS rank "
-            "FROM files WHERE (lower(name) LIKE ? OR lower(path) LIKE ?)" + clause +
-            " ORDER BY size DESC LIMIT ? OFFSET ?"
+            "SELECT " + self._HIT_COLUMNS + ", '' AS snip, 0 AS rank "
+            "FROM files f LEFT JOIN docmeta m ON m.doc_id = f.id "
+            "WHERE (lower(f.name) LIKE ? OR lower(f.path) LIKE ?)" + clause +
+            " ORDER BY f.size DESC LIMIT ? OFFSET ?"
         )
         params = params + [limit, offset]
         return self.execute(sql, params).fetchall()  # type: ignore[return-value]
 
+    # -- chunks (paragraph-level retrieval) ------------------------------
+    def file_ids(self, category: str = "", root: str = "") -> Optional[set[int]]:
+        """File ids matching the category/root filter.
+
+        ``None`` when the filter is empty (nothing to restrict by). Used to
+        give the vector retrieval channel the same filter the FTS channel
+        already applies in SQL — without it, a category filter silently
+        widened semantic results (review item H2).
+        """
+        if not category and not root:
+            return None
+        sql = "SELECT f.id FROM files f WHERE 1=1" + self._file_clause(category, root)
+        rows = self.execute(sql, self._file_clause_params(category, root)).fetchall()
+        return {int(r["id"]) for r in rows}
+    def delete_chunks(self, doc_id: int) -> None:
+        self.execute("DELETE FROM chunk_vectors WHERE doc_id=?", (doc_id,))
+        self.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
+
+    def replace_chunks(self, doc_id: int, chunks: Sequence[Any]) -> list[int]:
+        """Store ``chunk.Chunk`` objects for a document; returns their ids."""
+        self.delete_chunks(doc_id)
+        rows = [
+            (doc_id, c.ord, c.page, c.start_char, c.end_char, c.text, c.token_est)
+            for c in chunks
+        ]
+        if not rows:
+            return []
+        self.executemany(
+            "INSERT INTO chunks(doc_id, ord, page, start_char, end_char, text, token_est) "
+            "VALUES(?,?,?,?,?,?,?)",
+            rows,
+        )
+        ids = self.execute(
+            "SELECT id FROM chunks WHERE doc_id=? ORDER BY ord", (doc_id,)
+        ).fetchall()
+        return [int(r["id"]) for r in ids]
+
+    def chunks_for_doc(self, doc_id: int) -> list[sqlite3.Row]:
+        return self.execute(
+            "SELECT * FROM chunks WHERE doc_id=? ORDER BY ord", (doc_id,)
+        ).fetchall()  # type: ignore[return-value]
+
+    def chunks_by_ids(self, ids: Sequence[int]) -> dict[int, sqlite3.Row]:
+        if not ids:
+            return {}
+        out: dict[int, sqlite3.Row] = {}
+        for i in range(0, len(ids), 500):
+            part = list(ids[i:i + 500])
+            marks = ",".join("?" * len(part))
+            for r in self.execute(
+                "SELECT c.*, f.name, f.path, COALESCE(m.favorite, 0) AS favorite FROM chunks c "
+                "JOIN files f ON f.id = c.doc_id "
+                "LEFT JOIN docmeta m ON m.doc_id = c.doc_id "
+                f"WHERE c.id IN ({marks})",
+                part,
+            ):
+                out[int(r["id"])] = r
+        return out
+
+    def search_chunks(self, expr: str, limit: int = 60,
+                      category: str = "", root: str = "") -> list[sqlite3.Row]:
+        """BM25 ranking over chunk text (same query language as ``search``)."""
+        clause = self._file_clause(category, root)
+        sql = (
+            "SELECT c.id AS chunk_id, c.doc_id, c.ord, c.page, c.start_char, c.end_char, "
+            "       c.text, f.name, f.path, bm25(chunks_fts) AS rank "
+            "FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid "
+            "JOIN files f ON f.id = c.doc_id "
+            "WHERE chunks_fts MATCH ?" + clause + " "
+            "ORDER BY bm25(chunks_fts) LIMIT ?"
+        )
+        params: list[Any] = [expr] + self._file_clause_params(category, root) + [limit]
+        try:
+            return self.execute(sql, params).fetchall()  # type: ignore[return-value]
+        except sqlite3.OperationalError as exc:
+            log.warning("chunk FTS query failed: %s", exc)
+            return []
+
+    def chunk_count(self) -> int:
+        row = self.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()
+        return int(row["n"]) if row else 0
+
+    # -- chunk vectors ----------------------------------------------------
+    def set_chunk_vector(self, chunk_id: int, doc_id: int, blob: bytes,
+                         model: str = "", dim: int = 0) -> None:
+        self.execute(
+            "INSERT INTO chunk_vectors(chunk_id, doc_id, embedding, model, dim, ts) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(chunk_id) DO UPDATE SET "
+            "embedding=excluded.embedding, model=excluded.model, "
+            "dim=excluded.dim, ts=excluded.ts",
+            (chunk_id, doc_id, blob, model, dim, time.time()),
+        )
+
+    def chunk_vector_rows(self) -> list[tuple[int, int, bytes, int]]:
+        """(chunk_id, doc_id, blob, dim) for every embedded chunk."""
+        rows = self.execute(
+            "SELECT chunk_id, doc_id, embedding, COALESCE(dim, 0) AS dim FROM chunk_vectors"
+        ).fetchall()
+        return [(int(r["chunk_id"]), int(r["doc_id"]), bytes(r["embedding"]), int(r["dim"]))
+                for r in rows]
+
+    def chunk_vector_count(self) -> int:
+        row = self.execute("SELECT COUNT(*) AS n FROM chunk_vectors").fetchone()
+        return int(row["n"]) if row else 0
+
+    def docs_with_chunks(self, limit: int = 2000) -> list[sqlite3.Row]:
+        return self.execute(
+            "SELECT DISTINCT doc_id FROM chunks LIMIT ?", (limit,)
+        ).fetchall()  # type: ignore[return-value]
+
     # -- document metadata (AI insights, notes, favourites) -------------------
     def get_meta(self, doc_id: int) -> Optional[sqlite3.Row]:
-        return self.execute(
-            "SELECT * FROM docmeta WHERE doc_id=?", (doc_id,)
-        ).fetchone()
+        return self.execute("SELECT * FROM docmeta WHERE doc_id=?", (doc_id,)).fetchone()
 
-    def upsert_meta(self, doc_id: int, **fields) -> None:
+    def upsert_meta(self, doc_id: int, commit: bool = True, **fields: Any) -> None:
+        """Write AI metadata without a read-modify-write cycle.
+
+        Two statements, no SELECT: None means "leave the existing value".
+        """
         if doc_id <= 0:
             return
-        current = self.get_meta(doc_id)
-        values = {
-            "summary": fields.get("summary"),
-            "summary_lang": fields.get("summary_lang"),
-            "tags": fields.get("tags"),
-            "notes": fields.get("notes"),
-            "favorite": fields.get("favorite"),
-            "ai_status": fields.get("ai_status"),
-            "embedding": fields.get("embedding"),
-            "meta_ts": time.time(),
-        }
-        if current:
-            merged = dict(current)
-            for k, v in values.items():
-                if v is not None:
-                    merged[k] = v
-            merged["meta_ts"] = values["meta_ts"]
-            self.execute(
-                "UPDATE docmeta SET summary=?, summary_lang=?, tags=?, notes=?, favorite=?, "
-                "ai_status=?, embedding=?, meta_ts=? WHERE doc_id=?",
-                (merged["summary"], merged["summary_lang"], merged["tags"], merged["notes"],
-                 merged["favorite"], merged["ai_status"], merged["embedding"], merged["meta_ts"], doc_id),
-            )
-        else:
-            self.execute(
-                "INSERT OR REPLACE INTO docmeta(doc_id, summary, summary_lang, tags, notes, favorite, "
-                "ai_status, embedding, meta_ts) VALUES(?,?,?,?,?,?,?,?,?)",
-                (doc_id, values["summary"], values["summary_lang"], values["tags"], values["notes"],
-                 values["favorite"] or 0, values["ai_status"], values["embedding"], values["meta_ts"]),
-            )
-        self.commit()
+        self.execute(
+            "INSERT INTO docmeta(doc_id, summary, summary_lang, tags, notes, favorite, "
+            "ai_status, embedding, meta_ts, content_hash, embed_model, embed_dim, chunk_hash) "
+            "VALUES(?,?,?,?,?,COALESCE(?,0),?,?,?,?,?,?,?) "
+            "ON CONFLICT(doc_id) DO UPDATE SET "
+            "  summary      = COALESCE(excluded.summary, docmeta.summary), "
+            "  summary_lang = COALESCE(excluded.summary_lang, docmeta.summary_lang), "
+            "  tags         = COALESCE(excluded.tags, docmeta.tags), "
+            "  notes        = COALESCE(excluded.notes, docmeta.notes), "
+            "  favorite     = COALESCE(?, docmeta.favorite), "
+            "  ai_status    = COALESCE(excluded.ai_status, docmeta.ai_status), "
+            "  embedding    = COALESCE(excluded.embedding, docmeta.embedding), "
+            "  content_hash = COALESCE(excluded.content_hash, docmeta.content_hash), "
+            "  embed_model  = COALESCE(excluded.embed_model, docmeta.embed_model), "
+            "  embed_dim    = COALESCE(excluded.embed_dim, docmeta.embed_dim), "
+            "  chunk_hash   = COALESCE(excluded.chunk_hash, docmeta.chunk_hash), "
+            "  meta_ts      = excluded.meta_ts",
+            (
+                doc_id,
+                fields.get("summary"),
+                fields.get("summary_lang"),
+                fields.get("tags"),
+                fields.get("notes"),
+                fields.get("favorite"),
+                fields.get("ai_status"),
+                fields.get("embedding"),
+                time.time(),
+                fields.get("content_hash"),
+                fields.get("embed_model"),
+                fields.get("embed_dim"),
+                fields.get("chunk_hash"),
+                fields.get("favorite"),
+            ),
+        )
+        if commit:
+            self.commit()
 
     def toggle_favorite(self, doc_id: int) -> int:
-        meta = self.get_meta(doc_id)
-        flag = 1 if (meta and meta["favorite"]) else 0
-        new_flag = 0 if flag else 1
+        row = self.execute("SELECT favorite FROM docmeta WHERE doc_id=?", (doc_id,)).fetchone()
+        new_flag = 0 if (row and row["favorite"]) else 1
         self.upsert_meta(doc_id, favorite=new_flag)
         return new_flag
 
     def favorites(self, limit: int = 1000) -> list[sqlite3.Row]:
         return self.execute(
-            "SELECT f.id, f.name, f.path, f.ext, f.size, f.mtime, f.category, f.kind, f.status, "
-            "       f.hash AS file_hash, f.dup_id, '' AS snip, 0 AS rank, m.tags, m.summary "
+            "SELECT " + self._HIT_COLUMNS + ", '' AS snip, 0 AS rank, m.tags, m.summary "
             "FROM docmeta m JOIN files f ON f.id=m.doc_id "
             "WHERE m.favorite=1 AND f.kind='file' ORDER BY m.meta_ts DESC LIMIT ?",
             (limit,),
@@ -429,16 +600,15 @@ class Catalog:
 
     def files_with_tag(self, tag: str, limit: int = 500) -> list[sqlite3.Row]:
         return self.execute(
-            "SELECT f.id, f.name, f.path, f.ext, f.size, f.mtime, f.category, f.kind, f.status, "
-            "       f.hash AS file_hash, f.dup_id, '' AS snip, 0 AS rank "
+            "SELECT " + self._HIT_COLUMNS + ", '' AS snip, 0 AS rank "
             "FROM docmeta m JOIN files f ON f.id=m.doc_id "
             "WHERE m.tags IS NOT NULL AND (',' || REPLACE(m.tags,' ', '') || ',') LIKE ? "
             "LIMIT ?",
             (f"%,{tag},%", limit),
         ).fetchall()  # type: ignore[return-value]
 
-    def embedding_rows(self, max_chars_of_note: int = 4000) -> list[tuple[int, bytes, str]]:
-        """(doc_id, embedding blob, name) for every documented file with an embedding."""
+    def embedding_rows(self) -> list[tuple[int, bytes, str]]:
+        """(doc_id, embedding blob, name) for every documented file with a vector."""
         rows = self.execute(
             "SELECT m.doc_id, m.embedding, f.name FROM docmeta m "
             "JOIN files f ON f.id=m.doc_id WHERE m.embedding IS NOT NULL"
@@ -446,8 +616,19 @@ class Catalog:
         return [(r["doc_id"], bytes(r["embedding"]), r["name"]) for r in rows]
 
     def has_embeddings(self) -> bool:
+        row = self.execute(
+            "SELECT 1 FROM chunk_vectors LIMIT 1"
+        ).fetchone()
+        if row is not None:
+            return True
         row = self.execute("SELECT 1 FROM docmeta WHERE embedding IS NOT NULL LIMIT 1").fetchone()
         return row is not None
+
+    def ai_enriched_count(self) -> int:
+        row = self.execute(
+            "SELECT COUNT(*) AS n FROM docmeta WHERE summary IS NOT NULL AND summary != ''"
+        ).fetchone()
+        return int(row["n"]) if row else 0
 
     # -- app preferences (key/value, e.g. onboarding state) --------------------
     def pref_get(self, key: str, default: str = "") -> str:
@@ -477,12 +658,97 @@ class Catalog:
             "ORDER BY mtime DESC LIMIT ?", (root, like, limit),
         ).fetchall()  # type: ignore[return-value]
 
-    def files_for_ai(self, limit: int = 3000) -> list[sqlite3.Row]:
-        """Files most likely to benefit from AI enrichment (has text content)."""
+    # -- durable AI job queue ----------------------------------------------
+    AI_KINDS = ("summary", "tags", "embed")
+
+    def enqueue_ai_jobs(self, kinds: Sequence[str] = AI_KINDS, limit: int | None = None,
+                        retry_failed: bool = False) -> int:
+        """Queue enrichment work for every file whose artifacts are missing."""
+        missing_sql = {
+            "summary": "(m.summary IS NULL OR m.summary='')",
+            "tags": "(m.tags IS NULL OR m.tags='')",
+            "embed": ("(m.embedding IS NULL OR NOT EXISTS "
+                      "(SELECT 1 FROM chunk_vectors v WHERE v.doc_id=f.id))"),
+        }
+        for kind in kinds:
+            cond = missing_sql.get(kind)
+            if not cond:
+                continue
+            rows = self.execute(
+                "SELECT f.id AS doc_id, m.content_hash AS content_hash "
+                "FROM files f LEFT JOIN docmeta m ON m.doc_id=f.id "
+                "WHERE f.kind='file' AND f.status IN ('indexed','no_content') AND " + cond +
+                " ORDER BY COALESCE(m.favorite,0) DESC, f.size ASC"
+                + (f" LIMIT {int(limit)}" if limit else ""),
+            ).fetchall()
+            if not rows:
+                continue
+            # Re-open finished jobs: their artifacts are missing again (the file
+            # changed), so a 'done' row must not shadow the work. A 'queued' row is
+            # left alone so an in-flight backoff survives repeated enqueues.
+            reopen = "'done','failed'" if retry_failed else "'done'"
+            insert = (
+                "INSERT INTO ai_jobs(doc_id, kind, state, attempts, content_hash, updated_at) "
+                "VALUES(?,?,'queued',0,?,?) "
+                "ON CONFLICT(doc_id, kind) DO UPDATE SET "
+                "state='queued', attempts=0, next_at=NULL, updated_at=excluded.updated_at "
+                f"WHERE ai_jobs.state IN ({reopen})"
+            )
+            now = time.time()
+            self.executemany(insert, [(int(r["doc_id"]), kind, r["content_hash"], now) for r in rows])
+        self.commit()
+        row = self.execute("SELECT COUNT(*) AS n FROM ai_jobs WHERE state='queued'").fetchone()
+        return int(row["n"]) if row else 0
+
+    def runnable_jobs(self, limit: int = 32) -> list[sqlite3.Row]:
+        now = time.time()
         return self.execute(
-            "SELECT f.id FROM files f WHERE f.kind='file' AND f.status='indexed' "
-            "ORDER BY f.size ASC LIMIT ?", (limit,),
+            "SELECT j.id, j.doc_id, j.kind, j.attempts, f.name, f.size, "
+            "       COALESCE(m.favorite,0) AS favorite "
+            "FROM ai_jobs j JOIN files f ON f.id=j.doc_id "
+            "LEFT JOIN docmeta m ON m.doc_id=j.doc_id "
+            "WHERE j.state='queued' AND (j.next_at IS NULL OR j.next_at <= ?) "
+            "ORDER BY COALESCE(m.favorite,0) DESC, f.size ASC, j.id LIMIT ?",
+            (now, limit),
         ).fetchall()  # type: ignore[return-value]
+
+    def finish_job(self, job_id: int, doc_id: int, kind: str, state: str,
+                   error: str | None = None, attempts: int = 0,
+                   next_at: float | None = None, content_hash: str | None = None) -> None:
+        self.execute(
+            "UPDATE ai_jobs SET state=?, attempts=?, last_error=?, next_at=?, "
+            "content_hash=COALESCE(?, content_hash), updated_at=? WHERE id=?",
+            (state, attempts, (error or "")[:500] or None, next_at, content_hash,
+             time.time(), job_id),
+        )
+
+    def job_counts(self) -> dict[str, int]:
+        rows = self.execute("SELECT state, COUNT(*) AS n FROM ai_jobs GROUP BY state").fetchall()
+        return {str(r["state"]): int(r["n"]) for r in rows}
+
+    def clear_finished_jobs(self) -> int:
+        self.execute("DELETE FROM ai_jobs WHERE state IN ('done','skipped')")
+        self.commit()
+        row = self.execute("SELECT changes() AS c").fetchone()
+        return int(row["c"] or 0) if row else 0
+
+    # -- egress log ---------------------------------------------------------
+    def log_egress_entry(self, entry: dict[str, Any]) -> None:
+        self.execute(
+            "INSERT INTO egress(ts, kind, target, chars, doc_id) VALUES(?,?,?,?,?)",
+            (entry.get("ts") or time.time(), entry.get("kind", ""),
+             entry.get("target", ""), int(entry.get("chars") or 0), entry.get("doc_id")),
+        )
+        self.commit()
+
+    def egress_rows(self, limit: int = 200) -> list[sqlite3.Row]:
+        return self.execute(
+            "SELECT * FROM egress ORDER BY ts DESC LIMIT ?", (limit,)
+        ).fetchall()  # type: ignore[return-value]
+
+    def clear_egress(self) -> None:
+        self.execute("DELETE FROM egress")
+        self.commit()
 
     # -- stats ------------------------------------------------------------
     def stats(self) -> dict[str, Any]:
@@ -523,24 +789,11 @@ class Catalog:
             (limit,),
         ).fetchall()  # type: ignore[return-value]
 
-    def extensions_top(self, limit: int = 25) -> list[sqlite3.Row]:
-        return self.execute(
-            "SELECT COALESCE(NULLIF(ext,''),'[none]') AS ext, COUNT(*) AS n "
-            "FROM files WHERE kind='file' GROUP BY ext ORDER BY n DESC LIMIT ?",
-            (limit,),
-        ).fetchall()  # type: ignore[return-value]
-
-    def by_size_recent(self, limit: int = 20) -> list[sqlite3.Row]:
-        return self.execute(
-            "SELECT name, path, size, mtime, category FROM files "
-            "WHERE kind='file' ORDER BY mtime DESC LIMIT ?", (limit,)
-        ).fetchall()  # type: ignore[return-value]
-
     def recent_files(self, limit: int = 200) -> list[sqlite3.Row]:
         return self.execute(
-            "SELECT id, name, path, ext, size, mtime, category, kind, status, "
-            "       hash AS file_hash, dup_id, '' AS snip, 0 AS rank "
-            "FROM files WHERE kind='file' AND status != 'gone' "
-            "ORDER BY scanned_at DESC, mtime DESC LIMIT ?",
+            "SELECT " + self._HIT_COLUMNS + ", '' AS snip, 0 AS rank "
+            "FROM files f LEFT JOIN docmeta m ON m.doc_id = f.id "
+            "WHERE f.kind='file' AND f.status != 'gone' "
+            "ORDER BY f.scanned_at DESC, f.mtime DESC LIMIT ?",
             (limit,),
         ).fetchall()  # type: ignore[return-value]
