@@ -10,6 +10,7 @@ Google Translate endpoint alike.
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
 import threading
 import time
@@ -18,7 +19,8 @@ from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
 
-_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_ALLOWED_SCHEMES = {"http", "https"}
 
 _lock = threading.Lock()
 _offline_only = False
@@ -32,26 +34,40 @@ class EgressBlocked(Exception):
 
 
 def is_local_url(url: str) -> bool:
-    """True for loopback / private-network endpoints (never leave the machine)."""
+    """True for loopback / private-network endpoints (never leave the machine).
+
+    Parsing is deliberately strict, because this is the function that decides
+    whether offline-only mode lets a request through:
+
+      * only ``http``/``https`` — a ``file:``/``ftp:`` destination is never local;
+      * credentials in the URL (``https://user@host``) are rejected outright, so
+        ``http://127.0.0.1@attacker.example`` cannot masquerade as loopback;
+      * the *hostname* is then classified with :mod:`ipaddress` instead of
+        string prefixes, so ``172.16.0.1``, ``fd00::1``, ``169.254.1.1`` and
+        ``::1`` are all recognised without hand-rolled range arithmetic.
+    """
     try:
-        host = (urlparse(url).hostname or "").lower()
+        parsed = urlparse(url)
     except ValueError:  # pragma: no cover - defensive
         return False
+    scheme = (parsed.scheme or "").lower()
+    if scheme and scheme not in _ALLOWED_SCHEMES:
+        return False
+    try:
+        if parsed.username or parsed.password:
+            return False
+    except ValueError:  # pragma: no cover - malformed authority
+        return False
+    host = (parsed.hostname or "").strip().rstrip(".").lower()
     if not host:
         return False
-    if host in _LOOPBACK_HOSTS:
+    if host in _LOOPBACK_HOSTS or host.endswith(".localhost") or host.endswith(".local"):
         return True
-    if host.endswith(".local") or host.endswith(".localhost"):
-        return True
-    if host.startswith("10.") or host.startswith("192.168."):
-        return True
-    if host.startswith("172."):
-        try:
-            second = int(host.split(".")[1])
-        except (IndexError, ValueError):
-            return False
-        return 16 <= second <= 31
-    return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # a public DNS name
+    return ip.is_loopback or ip.is_private or ip.is_link_local
 
 
 def configure(offline_only: bool = False, sink: Optional[Callable[..., None]] = None) -> None:

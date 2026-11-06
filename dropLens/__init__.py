@@ -13,5 +13,10 @@ Drop any file or folder into the window and DropLens will:
 """
 
 APP_NAME = "DropLens"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 APP_TAGLINE = "Drop anything. Scan everything. Find it instantly."
+
+#: PEP 396 version attribute — `pip install .` and the wheel metadata read this
+#: through ``[tool.setuptools.dynamic]`` in ``pyproject.toml``, so the package,
+#: the exe's file properties and the installer can never disagree.
+__version__ = APP_VERSION

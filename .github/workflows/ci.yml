@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+
+jobs:
+  # Static gate: syntax, imports, lint. Fast, runs on every supported version.
+  static:
+    name: static (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-lock.txt
+
+      - name: Install runtime + dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install "ruff>=0.6"
+
+      - name: Lint (correctness rules only)
+        run: ruff check dropLens tests
+
+      # Turns the "originals are never modified" promise into a build gate.
+      - name: Enforce the read-only guarantee
+        run: python scripts/check_readonly.py
+
+      - name: Compile every module
+        run: python -m compileall -q dropLens tests
+
+      - name: Byte-compile the entry scripts
+        run: python -m py_compile launcher.py
+
+  # Behavioural gate: the engine, retrieval, AI, export and extension suites.
+  # test_gui.py is excluded on purpose — Tk needs a display and is verified on
+  # Windows before a release (see docs/RELEASE_CHECKLIST.md).
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Show resolved dependency set
+        run: python -m pip freeze
+
+      - name: Run the non-GUI test suite
+        run: python tests/run_all.py --no-gui --verbose
+
+  # Packaging gate: proves the project installs as a distribution and that both
+  # console entry points resolve.
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Install the wheel in a clean venv
+        run: |
+          python -m venv /tmp/pkgtest
+          /tmp/pkgtest/bin/python -m pip install --upgrade pip
+          /tmp/pkgtest/bin/python -m pip install dist/*.whl
+
+      - name: Verify entry points and CLI
+        run: |
+          /tmp/pkgtest/bin/droplens --help
+          /tmp/pkgtest/bin/droplens stats --json
+          /tmp/pkgtest/bin/python -c "import dropLens; print(dropLens.APP_VERSION)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: droplens-dist
+          path: dist/*
+          if-no-files-found: error
+
+  # Windows-specific compile gate: the shipped runtime is a Windows binary, so
+  # at minimum every module must import-compile on the target OS.
+  windows:
+    name: windows compile
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile every module
+        run: python -m compileall -q dropLens tests
+
+      - name: Run the non-GUI test suite
+        run: python tests/run_all.py --no-gui
+
+  # Advisory supply-chain check. Never blocks a release on its own — review the
+  # report, then decide (see docs/SECURITY.md).
+  audit:
+    name: dependency audit (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: pip-audit
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          python -m pip install -r requirements.txt
+          python -m pip_audit --progress-spinner off

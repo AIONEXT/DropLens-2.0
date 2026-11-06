@@ -223,10 +223,13 @@ class TranslateDialog(tk.Toplevel):
                 else:
                     self.after(0, lambda: self._done(res, target))
             except TranslationError as exc:
+                msg = str(exc)
                 if self.msg_q is not None:
-                    self.msg_q.put({"kind": "tr_fail", "dlg": self, "msg": str(exc)})
+                    self.msg_q.put({"kind": "tr_fail", "dlg": self, "msg": msg})
                 else:
-                    self.after(0, lambda: self._fail(str(exc)))
+                    # bind the message: `exc` is unbound once the except block ends,
+                    # so a late lambda would have raised NameError instead.
+                    self.after(0, lambda: self._fail(msg))
 
         threading.Thread(target=work, daemon=True).start()
 

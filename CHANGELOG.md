@@ -3,6 +3,91 @@
 All notable changes to DropLens are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.3.0] - 2026-11-06
+
+Release-hardening pass: the code is unchanged in what it does, and every
+remaining blocker to shipping it commercially — packaging, CI, the read-only
+promise, throughput on large libraries — is closed.
+
+### Added — packaging
+- **`pyproject.toml`** (PEP 621, setuptools): installable as a distribution, with
+  `droplens` and `droplens-gui` console scripts, extras for `ocr`, `msg`, `fast`,
+  `build` and `dev`, and a ruff configuration. The version is read dynamically
+  from `dropLens.__version__`, so packaging cannot drift from the app.
+- **`requirements-lock.txt`**: the exact resolved runtime closure, for
+  reproducible builds and enterprise rollouts. `requirements.txt` stays the
+  human-authored range file. Regenerate with `scripts/lock_requirements.sh` /
+  `.ps1`, which freeze a *clean* venv rather than the developer's machine.
+- **`tests/run_all.py`**: one gate that runs every suite in order, with
+  `--no-gui`, `--only-gui`, `--filter`, `--fail-fast` and per-suite timeouts, and
+  a single exit code. CI and the release checklist call it instead of eight
+  hand-typed commands.
+
+### Added — automation and documentation
+- **`.github/workflows/ci.yml`**: lint + compile on 3.11/3.12/3.13, the behaviour
+  suites, a wheel build installed into a clean venv with both entry points
+  exercised, a Windows compile/test job, and an advisory `pip-audit` report.
+- **`scripts/check_readonly.py`**: makes the “originals are never modified”
+  promise a build gate — it fails if any module under `dropLens/engine/` opens a
+  path for writing, deletes, renames, moves or copies (only `export.py` is
+  exempt, because it writes the destination the user picked), or if anything in
+  the package calls a shell with `shell=True`.
+- **`docs/SECURITY.md`**: trust model, data flow, where secrets live, the plugin
+  caveat, the prompt-injection boundary, supply-chain policy, and what is *not*
+  yet done (binary signing, SBOM).
+- **`docs/ENTERPRISE_DEPLOYMENT.md`**: per-user / per-machine / portable / pip
+  deployment shapes, silent-install flags, pre-seeded `settings.json`, offline
+  enforcement, backup-and-restore, headless fleet indexing, diagnostics.
+- **`docs/RELEASE_CHECKLIST.md`**, **`deploy/winget/AIONEXT.DropLens.yaml`**: the
+  go/no-go list and a manifest template for managed Windows fleets.
+
+### Changed — performance
+- **Scan progress is throttled** (`engine/scan.py`): a per-file progress message
+  meant a 200 000-file scan pushed 200 000 dicts through the GUI queue, so the
+  counter lagged by tens of thousands of files and memory grew. Progress is now
+  emitted at most every 150 ms (always once at the end), so the status line stays
+  live at a bounded cost.
+- **The GUI drain loop has a budget** (`ui/mainwindow.py`): instead of draining
+  the event queue until empty — which could keep the main thread busy long enough
+  to stop repainting during a large scan — at most 400 messages are handled per
+  tick, with the next tick scheduled immediately while work remains.
+- **SQLite gets one connection per thread** (`engine/db.py`, WAL): a single shared
+  connection let the GUI read uncommitted rows mid-scan and serialised every
+  reader behind the writer. Each thread now has its own connection, and the new
+  `Catalog.query()` materialises rows inside the lock so a cursor cannot outlive
+  the statement that produced it.
+
+### Fixed
+- **`--warmup` actually does something.** The installer has always passed it after
+  install; the flag was ignored, so it started a hidden full window. It now
+  pre-imports the heavy modules, opens the catalogue and exits — a real warm start
+  and an antivirus pre-scan — and never blocks a launch if it fails.
+- **Results list no longer depends on `sqlite3.Row` supporting `in`.** `_fill`
+  tested `"__score" in r`, which is a value comparison for a Row and a key check
+  for the semantic/related dicts. The branch now checks the type, so scored rows
+  are labelled and catalogue rows are not.
+- **Taskbar identity.** The app now calls
+  `SetCurrentProcessExplicitAppUserModelID("AIONEXT.DropLens.Desktop")`, matching
+  the installer shortcuts, so it gets its own taskbar group instead of the
+  interpreter's.
+
+### Security
+- **The Gemini API key is no longer sent in a URL.** All four call sites appended
+  `?key=`; keys in query strings land in proxy logs, server access logs and crash
+  dumps. The key now travels only in the `x-goog-api-key` header.
+- **`net.is_local_url` is strict.** Localhost detection is done with `ipaddress`
+  over a parsed URL, allowing only `http`/`https` and rejecting embedded
+  credentials — `http://127.0.0.1@attacker.example` used to read as local, which
+  would have let it past offline-only mode.
+
+### Installer
+- The MIT license is now shown on the wizard's license page
+  (`LicenseFile`), links carry the app's AppUserModelID, and
+  `PrivilegesRequired` defaults to `lowest` (per-user, no UAC) with a
+  `/DMyPrivileges=admin` override for shared machines.
+- Uninstall still leaves `%LOCALAPPDATA%\DropLens\catalog.db` in place: removing
+  the app must not force a full re-index.
+
 ## [2.2.0] - 2026-10-31
 
 ### Added — extensions and tools

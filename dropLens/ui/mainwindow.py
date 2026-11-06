@@ -75,6 +75,8 @@ class DropLensApp:
 
         self._results_meta: dict = {"offset": 0}
         self._results_items: dict[str, int] = {}
+        self._result_cap = 5000          # rows rendered at once; Load more continues
+        self._poll_budget = 400          # queue messages handled per 80 ms tick
         self._ai_stop_flag = False
         self._cite_payload: dict[str, dict] = {}
         net.configure(self.cfg.offline_only, sink=self.db.log_egress_entry)
@@ -736,15 +738,22 @@ class DropLensApp:
         self.q.put(msg)
 
     def _poll(self) -> None:
-        drained = False
-        while True:
+        """Drain the worker queue without starving the window.
+
+        A bounded budget per tick matters: draining "until empty" during a
+        large scan could keep the main thread inside this loop long enough for
+        the window to stop repainting. When work remains the next tick is
+        scheduled immediately (1 ms) instead of waiting the full 80 ms.
+        """
+        handled = 0
+        while handled < self._poll_budget:
             try:
                 msg = self.q.get_nowait()
             except queue.Empty:
                 break
-            drained = True
+            handled += 1
             self._handle(msg)
-        self.master.after(80, self._poll)
+        self.master.after(1 if not self.q.empty() else 80, self._poll)
 
     def _handle(self, msg: dict) -> None:
         kind = msg.get("kind")
@@ -1171,26 +1180,28 @@ class DropLensApp:
 
     def _fill(self, rows) -> None:
         tree = self.results_tree
+        shown = len(tree.get_children())
         for r in rows:
             iid = str(r["id"])
             self._results_items[iid] = int(r["id"])
-            if len(tree.get_children()) >= 5000:
+            if shown >= self._result_cap:
                 break
             star = "★ " if row_get(r, "favorite", 0) else ""
-            if "__score" in r:
-                name_col = f"{star}{r['name']}  ({float(r['__score']):.2f})"
-            else:
-                name_col = f"{star}{r['name']}"
+            # semantic/related rows are dicts carrying a score; catalogue rows
+            # are sqlite3.Row (no .get), so membership is checked by type
+            score = r.get("__score") if isinstance(r, dict) else None
+            name_col = (f"{star}{r['name']}  ({float(score):.2f})" if score is not None
+                        else f"{star}{r['name']}")
             tree.insert("", "end", iid=iid,
                         values=(name_col, category_label(r["category"]), human_size(r["size"]),
                                 time.strftime("%Y-%m-%d %H:%M", time.localtime(r["mtime"])),
                                 r["path"]))
-        total = self._results_meta.get("total", 0)
-        self.results_label.set(
-            f"{len(tree.get_children()):,} result{'s' if len(tree.get_children()) != 1 else ''} "
-            f"for “{self.term_var.get()}”")
-        if len(tree.get_children()) >= 300:
-            self.results_label.set(self.results_label.get() + "  (use Load more for additional matches)")
+            shown += 1
+        noun = "result" if shown == 1 else "results"
+        self.results_label.set(f"{shown:,} {noun} for “{self.term_var.get()}”")
+        if shown >= 300:
+            self.results_label.set(self.results_label.get() +
+                                   "  (use Load more for additional matches)")
 
     def results_empty_state(self, msg: str | None = None) -> None:
         tree = self.results_tree

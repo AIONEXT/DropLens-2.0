@@ -144,43 +144,85 @@ class Catalog:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute("PRAGMA busy_timeout=15000")
+        self._local = threading.local()
+        self._connections: list[sqlite3.Connection] = []
+        self._closed = False
+        self._conn = self._new_connection()
+        self._local.conn = self._conn          # the creating thread reuses it
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self.schema_version = migrations.apply(self._conn)
             self._conn.commit()
 
+    # -- connection handling ---------------------------------------------
+    def _new_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=15.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=15000")
+        self._connections.append(conn)
+        return conn
+
+    def connection(self) -> sqlite3.Connection:
+        """The calling thread's connection, created on first use.
+
+        Every thread gets its own connection (WAL supports many readers and one
+        writer). This is what makes the cross-thread contract sound rather than
+        merely lucky: a scan thread holding an open ``BEGIN`` can no longer make
+        the GUI read its uncommitted rows through a shared cursor — a dirty read
+        that was possible while every thread shared one connection.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            if self._closed:
+                raise sqlite3.ProgrammingError("Catalog is closed")
+            with self._lock:
+                conn = self._new_connection()
+            self._local.conn = conn
+        return conn
+
     # -- transactional helpers -------------------------------------------
     def begin(self) -> None:
         with self._lock:
-            self._conn.execute("BEGIN")
+            self.connection().execute("BEGIN")
 
     def commit(self) -> None:
         with self._lock:
-            self._conn.commit()
+            self.connection().commit()
 
     def rollback(self) -> None:
         with self._lock:
-            self._conn.rollback()
+            self.connection().rollback()
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
-            return self._conn.execute(sql, tuple(params))
+            return self.connection().execute(sql, tuple(params))
 
     def executemany(self, sql: str, seq: Iterable[Iterable[Any]]) -> None:
         with self._lock:
-            self._conn.executemany(sql, seq)
+            self.connection().executemany(sql, seq)
+
+    def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
+        """Run a read and materialise the rows *inside* the lock.
+
+        Preferred over ``execute(...).fetchall()`` for read paths: the rows are
+        already in memory when the lock is released, so a concurrent writer on
+        the same thread's connection cannot invalidate the cursor mid-iteration.
+        """
+        with self._lock:
+            return self.connection().execute(sql, tuple(params)).fetchall()
 
     def close(self) -> None:
         with self._lock:
-            try:
-                self._conn.close()
-            except sqlite3.Error:
-                pass
+            self._closed = True
+            for conn in self._connections:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            self._connections.clear()
+            self._local = threading.local()
 
     # -- roots -----------------------------------------------------------
     def add_root(self, path: str) -> int:

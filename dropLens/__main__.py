@@ -5,7 +5,10 @@ by the headless CLI in :mod:`dropLens.cli`.
 """
 import sys
 
-_GUI_FLAGS = {"", "--gui", "-g", "--app"}
+# Flags that belong to the desktop app rather than the headless CLI. The frozen
+# build goes through launcher.py, so --warmup must also work here for a source
+# run to behave like the exe the installer launches.
+_GUI_FLAGS = {"", "--gui", "-g", "--app", "--warmup"}
 
 
 def _run() -> int:

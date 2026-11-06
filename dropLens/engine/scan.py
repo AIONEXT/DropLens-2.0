@@ -117,6 +117,18 @@ class ScanManager:
         path_rec: dict[str, dict] = {}    # path -> buffered record (lets us backfill hashes)
         flushed: set[str] = set()
         batch_limit = 400
+        # Progress is throttled: a per-file message on a 200k-file scan pushed
+        # 200k dicts through the GUI's drain loop, so the counter lagged
+        # arbitrarily and the queue grew without bound (review §3.3.4).
+        progress_every = 0.15
+        last_progress = [0.0]
+
+        def emit_progress(force: bool = False) -> None:
+            now = time.time()
+            if not force and now - last_progress[0] < progress_every:
+                return
+            last_progress[0] = now
+            self.on_progress({"kind": "file", "count": len(seen)})
 
         from ..extensions import default as extensions, load_from_config
 
@@ -247,8 +259,7 @@ class ScanManager:
                 pending.append(rec)
                 if len(pending) >= batch_limit:
                     flush()
-                self.on_progress({"kind": "file", "path": fi.path, "kind2": fi.kind,
-                                  "count": len(seen)})
+                emit_progress()
 
         try:
             batch: list[FileInfo] = []
@@ -282,6 +293,7 @@ class ScanManager:
                 self.catalog.rollback()
             pool.shutdown(wait=False, cancel_futures=True)
 
+        emit_progress(force=True)
         if not is_file_scan:
             self.catalog.touch_root_scan(root_col, "cancelled" if res.cancelled else "indexed")
         res.duration = time.time() - started

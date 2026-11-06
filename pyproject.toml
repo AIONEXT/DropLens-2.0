@@ -1,0 +1,93 @@
+[build-system]
+# setuptools>=77 is required for PEP 639 license expressions (`license = "MIT"`
+# + `license-files`); older backends reject the config outright.
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "droplens"
+dynamic = ["version"]
+description = "Offline-first universal file indexer, organizer and AI search console"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "AIONEXT" }]
+keywords = ["search", "indexer", "full-text", "sqlite", "fts5", "rag", "offline", "desktop"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Information Technology",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Desktop Environment",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
+dependencies = [
+    "PyMuPDF>=1.24",
+    "python-docx>=1.1.0",
+    "python-pptx>=1.0.0",
+    "openpyxl>=3.1.0",
+    "charset-normalizer>=3.3.0",
+    "requests>=2.31.0",
+    "tkinterdnd2>=0.4.2",
+    "Pillow>=10.0.0",
+    "pystray>=0.19.5",
+    "respan-gateway==0.3.0",
+    "py7zr>=0.21",
+    "rarfile>=4.1",
+]
+
+[project.optional-dependencies]
+# OCR for images (also needs the Tesseract binary on PATH or in Settings)
+ocr = ["pytesseract>=0.3.10"]
+# Legacy Outlook .msg files
+msg = ["extract-msg>=0.48"]
+# NumPy speeds up vector search a lot past ~10k chunks; the app runs without it
+fast = ["numpy>=1.26"]
+# Producing the single-file Windows executable
+build = ["pyinstaller>=6.3"]
+dev = ["pytest>=8", "ruff>=0.6", "pip-audit>=2.7"]
+
+[project.scripts]
+droplens = "dropLens.cli:main"
+droplens-gui = "dropLens.main:main"
+
+[project.urls]
+Homepage = "https://github.com/AIONEXT/DropLens-2.0"
+Documentation = "https://github.com/AIONEXT/DropLens-2.0/tree/main/docs"
+Changelog = "https://github.com/AIONEXT/DropLens-2.0/blob/main/CHANGELOG.md"
+Security = "https://github.com/AIONEXT/DropLens-2.0/blob/main/docs/SECURITY.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "dropLens.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["dropLens*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = [".venv", "build", "dist", "installer"]
+
+[tool.ruff.lint]
+# Deliberately narrow: rules that catch defects a test run would miss (undefined
+# names, unreachable/defaulted `except`, statements that cannot execute, silent
+# redefinitions) and nothing cosmetic. Widening this to the full F/B/E sets would
+# flag ~60 pre-existing style leftovers in the UI layer, and a gate that everyone
+# has to ignore is worse than no gate. Raise the bar rule by rule, not at once.
+select = [
+  "E9",   # syntax / IO errors
+  "F63",  # invalid print/assert syntax
+  "F7",   # statement outside function, bare except after default, ...
+  "F811", # redefinition of an unused name (a duplicate def that silently wins)
+  "F82",  # undefined / unbound names - the bug class that crashes at click time
+]
+ignore = ["E501"]

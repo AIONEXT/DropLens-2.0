@@ -1,0 +1,48 @@
+# winget manifest (singleton, schema 1.6) — local install / submission template.
+#
+#   winget install --manifest .\deploy\winget\AIONEXT.DropLens.yaml
+#
+# Before publishing a release: set PackageVersion, InstallerUrl and the real
+# InstallerSha256 (Get-FileHash ... -Algorithm SHA256), then either submit a PR
+# to microsoft/winget-pkgs or host this file for internal use.
+PackageIdentifier: AIONEXT.DropLens
+PackageVersion: 2.3.0
+PackageLocale: en-US
+Publisher: AIONEXT
+PublisherUrl: https://github.com/AIONEXT/DropLens-2.0
+PublisherSupportUrl: https://github.com/AIONEXT/DropLens-2.0/issues
+PackageName: DropLens
+PackageUrl: https://github.com/AIONEXT/DropLens-2.0
+License: MIT
+LicenseUrl: https://github.com/AIONEXT/DropLens-2.0/blob/main/LICENSE
+Copyright: MIT (c) AIONEXT
+ShortDescription: Offline-first file indexer and AI search console for Windows
+Description: >-
+  DropLens indexes any file or folder into a local SQLite catalogue and makes it
+  searchable by keyword and by meaning. It extracts text from 25+ formats, answers
+  questions with paragraph-level citations, and can run entirely offline with a
+  local model. Originals are never modified.
+Moniker: droplens
+Tags:
+  - search
+  - indexer
+  - full-text
+  - files
+  - offline
+  - privacy
+  - ai
+ReleaseNotesUrl: https://github.com/AIONEXT/DropLens-2.0/blob/main/CHANGELOG.md
+Installers:
+  - Architecture: x64
+    InstallerType: inno
+    Scope: user
+    InstallerUrl: https://github.com/AIONEXT/DropLens-2.0/releases/download/v2.3.0/Setup-DropLens-2.3.0.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    InstallerSwitches:
+      Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
+      SilentWithProgress: /SILENT /SUPPRESSMSGBOXES /NORESTART
+      Custom: /LICENSEACCEPTED=yes
+    UpgradeBehavior: install
+    ProductCode: "{7F3E1B6A-9C24-4A6E-B8D5-0D2C9A3F1E05}"
+ManifestType: singleton
+ManifestVersion: 1.6.0

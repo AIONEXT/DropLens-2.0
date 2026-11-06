@@ -175,8 +175,10 @@ def _chat_gemini(provider: AIProvider, messages, temperature, max_tokens) -> str
         "generationConfig": {"temperature": temperature,
                              **({"maxOutputTokens": max_tokens} if max_tokens else {})},
     }
-    if provider.api_key:
-        url = f"{url}?key={provider.api_key}"
+    # The key travels in the ``x-goog-api-key`` header (set by ``_headers``) and
+    # never in the query string: ``?key=`` is Google's documented example, but a
+    # URL carrying a credential ends up in proxy logs, browser histories and
+    # network captures. Header auth is equally supported and does not leak.
     data = _post(provider, url, body)
     try:
         return "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"]).strip()
@@ -220,8 +222,6 @@ def _embed_gemini_batch(provider: AIProvider, texts: list[str]) -> list[list[flo
     url = f"{provider.base_url}/models/{provider.embedding_model}:batchEmbedContents"
     body = {"requests": [{"model": f"models/{provider.embedding_model}",
                           "content": {"parts": [{"text": t}]}} for t in texts]}
-    if provider.api_key:
-        url = f"{url}?key={provider.api_key}"
     try:
         data = _post(provider, url, body)
         return [[float(x) for x in item["values"]] for item in data["embeddings"]]
@@ -232,8 +232,6 @@ def _embed_gemini_batch(provider: AIProvider, texts: list[str]) -> list[list[flo
 def _embed_gemini(provider: AIProvider, text: str) -> list[float]:
     url = f"{provider.base_url}/models/{provider.embedding_model}:embedContent"
     body = {"content": {"parts": [{"text": text}]}}
-    if provider.api_key:
-        url = f"{url}?key={provider.api_key}"
     data = _post(provider, url, body)
     try:
         return [float(x) for x in data["embedding"]["values"]]
@@ -435,8 +433,6 @@ def _tools_gemini(provider: AIProvider, messages, tools, temperature, max_tokens
              "parameters": t.get("parameters") or {"type": "object", "properties": {}}}
             for t in tools]}]
     url = f"{provider.base_url}/models/{provider.model}:generateContent"
-    if provider.api_key:
-        url = f"{url}?key={provider.api_key}"
     data = _post(provider, url, body)
     try:
         parts = data["candidates"][0]["content"]["parts"]

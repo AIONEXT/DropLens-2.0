@@ -16,6 +16,7 @@ files — searchable **by keyword and by meaning**.
 ![build](https://img.shields.io/badge/build-PyInstaller%20onefile-orange)
 ![ai](https://img.shields.io/badge/AI-any%20local%20%7C%20cloud%20model-22d3ee)
 ![license](https://img.shields.io/badge/license-MIT-green)
+![ci](https://github.com/AIONEXT/DropLens-2.0/actions/workflows/ci.yml/badge.svg)
 
 </div>
 
@@ -46,6 +47,17 @@ files — searchable **by keyword and by meaning**.
 
 **Download the installer** — `Setup-DropLens-2.x.exe` (see Releases) — run it,
 click through the branded wizard, then drop or scan.
+
+**Or install it as a Python package** — the CLI, plugins and scripting surface,
+no build step, no admin rights:
+
+```bash
+pip install -r requirements-lock.txt   # exact, reproducible dependency set
+pip install .                          # exposes `droplens` and `droplens-gui`
+droplens stats --json                  # headless: same catalogue, scriptable
+droplens search "invoice" --json
+python -m dropLens                     # the window (needs Tk; the installer ships it)
+```
 
 **Or build / run from source:**
 
@@ -173,12 +185,18 @@ Override at runtime with the `DROPLENS_DIR` environment variable, or change
 See [`build/BUILD.md`](build/BUILD.md). Short version:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean -Version 2.2.0      # DropLens.exe
-powershell -ExecutionPolicy Bypass -File .\build_installer.ps1 -Version 2.2.0   # Setup-DropLens.exe
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean -Version 2.3.0      # DropLens.exe
+powershell -ExecutionPolicy Bypass -File .\build_installer.ps1 -Version 2.3.0   # Setup-DropLens.exe
 ```
 
-> **For public/commercial distribution:** code-sign both exes (OV/EV cert) and
-> pin dependency versions. Details in [`docs/COMMERCIAL.md`](docs/COMMERCIAL.md).
+The version is single-sourced from `APP_VERSION` in `dropLens/__init__.py`; both
+scripts read it, and `build.ps1` stamps `build\version_info.txt` before compiling,
+so the exe, the installer and the catalogue cannot disagree.
+
+> **For public/commercial distribution:** code-sign both exes (OV/EV cert), install
+> from the pinned lockfile, and work through
+> [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md). Signing and
+> distribution details are in [`docs/COMMERCIAL.md`](docs/COMMERCIAL.md).
 
 ---
 
@@ -245,7 +263,31 @@ before → after improvement scope of 2.1.0 (retrieval depth, freshness, correct
 and 2.2.0 (extensions, tools, agentic answers), and the explicit list of what we must **not**
 claim yet.
 
+## Documentation
+
+| Document | What it answers |
+|---|---|
+| [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | How to install and use every feature |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Trust model, what leaves the machine, key storage, plugin caveats — written for a security review |
+| [`docs/ENTERPRISE_DEPLOYMENT.md`](docs/ENTERPRISE_DEPLOYMENT.md) | Silent deploy, per-machine installs, pre-seeded settings, offline enforcement, fleet indexing |
+| [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) | Every gate a build must pass before it ships |
+| [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) | Writing extractors, tools and hooks |
+| [`docs/ARCHITECTURE_REVIEW.md`](docs/ARCHITECTURE_REVIEW.md) | The historical 2.0 defect review its fixes are measured against |
+| [`read.md`](read.md) | Full architecture: layering, schema, pipeline, retrieval, trust model |
+
+---
+
 ## Tests
+
+One command runs every suite and returns a single exit code — the same gate CI
+and releases use:
+
+```powershell
+python -X utf8 tests\run_all.py --no-gui     # CI parity: no display needed
+python -X utf8 tests\run_all.py              # adds the GUI suite (Windows, needs a display)
+```
+
+Each suite still runs on its own:
 
 ```powershell
 python -X utf8 tests\test_engine.py     # scan, search, dedup, extraction, CSV export
